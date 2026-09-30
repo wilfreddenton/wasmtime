@@ -4,7 +4,7 @@ use crate::runtime::vm;
 use crate::runtime::vm::component::{
     CallContext, ComponentInstance, HandleTable, OwnedComponentInstance, Scope,
 };
-use crate::store::{StoreData, StoreId, StoreOpaque};
+use crate::store::{StoreData, StoreFuel, StoreId, StoreOpaque};
 use crate::{AsContext, AsContextMut, Engine, Store, StoreContextMut, bail_bug};
 use core::pin::Pin;
 use wasmtime_environ::component::RuntimeComponentInstanceIndex;
@@ -374,10 +374,11 @@ impl StoreOpaque {
         &mut HandleTable,
         &mut HostResourceData,
         Pin<&mut ComponentInstance>,
+        Option<StoreFuel<'_>>,
     ) {
         let instance = instance.id();
         instance.assert_belongs_to(self.id());
-        let data = self.component_data_mut();
+        let (data, fuel) = self.component_data_and_fuel_mut();
         (
             &mut data.task_state,
             &mut data.component_host_table,
@@ -386,6 +387,7 @@ impl StoreOpaque {
                 .as_mut()
                 .unwrap()
                 .get_mut(),
+            fuel,
         )
     }
 
@@ -516,6 +518,13 @@ impl<T> Store<T> {
     /// guest to the host is limited.
     ///
     /// The default value for this is 128 MiB.
+    ///
+    /// When [`crate::Config::consume_fuel`] is enabled, consuming hostcall fuel
+    /// also deducts the same amount from [`Store::get_fuel`]. This shared
+    /// budget applies across lifts and Wasm execution. The per-lift limit
+    /// configured here still applies independently, and exhausting it does
+    /// not deduct the rejected charge from Store fuel. Accepted charges are
+    /// retained if lifting subsequently fails.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

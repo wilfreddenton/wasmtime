@@ -507,6 +507,86 @@ mod component {
     pub fn measure_execution_time(c: &mut Criterion) {
         host_to_wasm(c);
         wasm_to_host(c);
+        lifting_fuel(c);
+    }
+
+    fn lifting_fuel(c: &mut Criterion) {
+        let mut group = c.benchmark_group("component-lifting");
+        for enabled in [false, true] {
+            let engine = Engine::new(Config::new().consume_fuel(enabled)).unwrap();
+            for (name, ty, data) in [
+                (
+                    "string16",
+                    "string",
+                    r#"(data (i32.const 0) "\10\00\00\00\10\00\00\00")"#.to_owned(),
+                ),
+                (
+                    "string4096",
+                    "string",
+                    r#"(data (i32.const 0) "\10\00\00\00\00\10\00\00")"#.to_owned(),
+                ),
+                (
+                    "list32strings",
+                    "(list string)",
+                    format!(
+                        r#"(data (i32.const 0) "\10\00\00\00\20\00\00\00")
+                        (data (i32.const 16) "{}")"#,
+                        "\\00\\02\\00\\00\\01\\00\\00\\00".repeat(32),
+                    ),
+                ),
+            ] {
+                let component = Component::new(
+                    &engine,
+                    format!(
+                        r#"(component
+                    (core module $m
+                        (memory (export "memory") 1)
+                        {data}
+                        (func (export "run") (result i32) i32.const 0))
+                    (core instance $i (instantiate $m))
+                    (func (export "run") (result {ty})
+                        (canon lift (core func $i "run") (memory (core memory $i "memory")))))"#
+                    ),
+                )
+                .unwrap();
+                let mut store = Store::new(&engine, ());
+                let instance = component::Linker::new(&engine)
+                    .instantiate(&mut store, &component)
+                    .unwrap();
+                let run = instance.get_func(&mut store, "run").unwrap();
+                let mut results = [component::Val::Bool(false)];
+                let mode = if enabled { "enabled" } else { "disabled" };
+                group.bench_function(format!("{mode}/dynamic/{name}"), |b| {
+                    b.iter_custom(|iterations| {
+                        if enabled {
+                            store.set_fuel(u64::MAX).unwrap();
+                        }
+                        let start = Instant::now();
+                        for _ in 0..iterations {
+                            run.call(&mut store, &[], &mut results).unwrap();
+                        }
+                        start.elapsed()
+                    });
+                });
+                if ty == "string" {
+                    let run = instance
+                        .get_typed_func::<(), (String,)>(&mut store, "run")
+                        .unwrap();
+                    group.bench_function(format!("{mode}/typed/{name}"), |b| {
+                        b.iter_custom(|iterations| {
+                            if enabled {
+                                store.set_fuel(u64::MAX).unwrap();
+                            }
+                            let start = Instant::now();
+                            for _ in 0..iterations {
+                                std::hint::black_box(run.call(&mut store, ()).unwrap());
+                            }
+                            start.elapsed()
+                        });
+                    });
+                }
+            }
+        }
     }
 
     trait ToComponentVal {

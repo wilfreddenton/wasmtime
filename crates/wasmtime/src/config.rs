@@ -633,6 +633,12 @@ impl Config {
     /// configured to yield execution periodically via
     /// [`crate::Store::fuel_async_yield_interval`].
     ///
+    /// This also charges component lifting against the same fuel budget at
+    /// its existing hostcall-fuel checks. Each unit of hostcall fuel consumed
+    /// costs one unit of Store fuel. Component lowering is not charged by
+    /// this option, apart from any Wasm instructions executed by the guest
+    /// allocator.
+    ///
     /// Note that a [`Store`] starts with no fuel, so if you enable this option
     /// you'll have to be sure to pour some fuel into [`Store`] before
     /// executing some code.
