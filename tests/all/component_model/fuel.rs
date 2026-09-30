@@ -1,5 +1,11 @@
 use super::ApiStyle;
-use wasmtime::component::{Component, Linker, Val};
+use crate::async_functions::PollOnce;
+use std::mem::size_of;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
+use wasmtime::component::{
+    Component, Linker, Source, StreamConsumer, StreamReader, StreamResult, Val,
+};
 use wasmtime::{Config, Engine, Result, Store, StoreContextMut, Trap};
 
 fn component(engine: &Engine) -> Result<Component> {
@@ -93,6 +99,171 @@ async fn typed_results_charge_in_all_call_styles() -> Result<()> {
         assert_eq!(store.get_fuel()?, cost);
         style.call(&mut store, valid, ()).await?;
         assert_eq!(store.get_fuel()?, 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifting_exhausts_the_active_batch_before_the_next_guest_call() -> Result<()> {
+    for style in [
+        ApiStyle::Async,
+        ApiStyle::AsyncNotConcurrent,
+        ApiStyle::Concurrent,
+    ] {
+        let mut config = style.config();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)?;
+        let component = component(&engine)?;
+        let mut store = Store::new(&engine, ());
+        let instance = style
+            .instantiate(&mut store, &Linker::new(&engine), &component)
+            .await?;
+        let empty = instance.get_typed_func::<(), (String,)>(&mut store, "empty")?;
+        let valid = instance.get_typed_func::<(), (String,)>(&mut store, "valid")?;
+        store.set_fuel(10_000)?;
+        style.call(&mut store, empty, ()).await?;
+        let instructions = 10_000 - store.get_fuel()?;
+        // Leave enough active fuel for another empty call, but not the string lift.
+        assert!(instructions < 8);
+        store.fuel_async_yield_interval(Some(instructions + 8))?;
+
+        for (first, bytes) in [(empty, 0), (valid, 16)] {
+            store.set_fuel(10_000)?;
+            {
+                let mut call = pin!(style.call(&mut store, first, ()));
+                let Ok(result) = PollOnce::new(call.as_mut()).await else {
+                    panic!("lifting should complete without yielding");
+                };
+                assert_eq!(result?.0.len(), bytes);
+            }
+            assert_eq!(store.get_fuel()?, 10_000 - instructions - bytes as u64);
+            {
+                let mut call = pin!(style.call(&mut store, empty, ()));
+                match PollOnce::new(call.as_mut()).await {
+                    Err(call) => {
+                        assert_eq!(bytes, 16, "an empty lift must not exhaust the batch");
+                        assert_eq!(call.await?.0, "");
+                    }
+                    Ok(result) => {
+                        result?;
+                        assert_eq!(bytes, 0, "the string lift must advance the next yield");
+                    }
+                }
+            }
+            assert_eq!(store.get_fuel()?, 10_000 - 2 * instructions - bytes as u64);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct StreamFuelState {
+    values: Vec<String>,
+    balances: Vec<u64>,
+}
+
+struct StringConsumer;
+
+impl StreamConsumer<StreamFuelState> for StringConsumer {
+    type Item = String;
+
+    fn poll_consume(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        mut store: StoreContextMut<'_, StreamFuelState>,
+        mut source: Source<'_, String>,
+        _finish: bool,
+    ) -> Poll<Result<StreamResult>> {
+        let before = store.get_fuel()?;
+        store.data_mut().balances.push(before);
+        while source.remaining(&mut store) > 0 {
+            let mut value = None;
+            let result = source.read(&mut store, &mut value);
+            let remaining = store.get_fuel()?;
+            store.data_mut().balances.push(remaining);
+            result?;
+            store.data_mut().values.push(value.unwrap());
+        }
+        Poll::Ready(Ok(StreamResult::Completed))
+    }
+}
+
+#[tokio::test]
+async fn stream_lifting_exhaustion_retains_accepted_items_and_charges() -> Result<()> {
+    for style in [ApiStyle::Async, ApiStyle::Concurrent] {
+        let mut config = style.config();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)?;
+        let component = Component::new(
+            &engine,
+            r#"(component
+                (core module $memory
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "\20\00\00\00\08\00\00\00\28\00\00\00\08\00\00\00")
+                    (data (i32.const 32) "abcdefghijklmnop"))
+                (core instance $memory (instantiate $memory))
+                (type $s (stream string))
+                (core func $new (canon stream.new $s))
+                (core func $write (canon stream.write $s async (memory (core memory $memory "memory"))))
+                (core module $guest
+                    (import "" "new" (func $new (result i64)))
+                    (import "" "write" (func $write (param i32 i32 i32) (result i32)))
+                    (global $writer (mut i32) (i32.const 0))
+                    (func (export "start") (result i32)
+                        (local $pair i64)
+                        (local.set $pair (call $new))
+                        (global.set $writer (i32.wrap_i64 (i64.shr_u (local.get $pair) (i64.const 32))))
+                        (i32.wrap_i64 (local.get $pair)))
+                    (func (export "write") (result i32)
+                        (call $write (global.get $writer) (i32.const 0) (i32.const 2))))
+                (core instance $guest (instantiate $guest
+                    (with "" (instance
+                        (export "new" (func $new))
+                        (export "write" (func $write))))))
+                (func (export "start") (result $s) (canon lift (core func $guest "start")))
+                (func (export "write") (result u32) (canon lift (core func $guest "write"))))"#,
+        )?;
+        // Streams charge the host item representation as well as its string bytes.
+        let item_cost = size_of::<String>() as u64 + 8;
+        let mut before_host = 0;
+        for available in [10_000, item_cost - 1, 2 * item_cost - 1] {
+            let mut store = Store::new(&engine, StreamFuelState::default());
+            store.set_fuel(10_000)?;
+            let instance = style
+                .instantiate(&mut store, &Linker::new(&engine), &component)
+                .await?;
+            let start =
+                instance.get_typed_func::<(), (StreamReader<String>,)>(&mut store, "start")?;
+            let write = instance.get_typed_func::<(), (u32,)>(&mut store, "write")?;
+            let (reader,) = style.call(&mut store, start, ()).await?;
+            reader.pipe(&mut store, StringConsumer)?;
+            store.set_fuel(before_host + available)?;
+            let result = style.call(&mut store, write, ()).await;
+            let state = store.data();
+            if available == 10_000 {
+                assert_eq!(result?.0, 2 << 4);
+                assert_eq!(state.values, ["abcdefgh", "ijklmnop"]);
+                let before = state.balances[0];
+                assert_eq!(
+                    state.balances,
+                    [before, before - item_cost, before - 2 * item_cost]
+                );
+                before_host = available - before;
+            } else {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+                assert_eq!(store.get_fuel()?, 0);
+                if available < item_cost {
+                    assert!(state.values.is_empty());
+                    assert_eq!(state.balances, [available, 0]);
+                } else {
+                    assert_eq!(state.values, ["abcdefgh"]);
+                    assert_eq!(state.balances, [available, item_cost - 1, 0]);
+                }
+            }
+        }
     }
     Ok(())
 }
