@@ -511,9 +511,9 @@ impl<'a> LiftContext<'a> {
     /// Consumes `amt` units of fuel, typically a number of bytes, from this
     /// context.
     ///
-    /// Checks the per-lift allowance first, then also charges Store fuel when
-    /// fuel consumption is enabled. Both checks precede the associated work;
-    /// accepted charges are retained if a later part of lifting fails.
+    /// Checks the per-lift allowance before charging Store fuel when fuel
+    /// consumption is enabled. Returns an error if either budget is insufficient.
+    /// Accepted charges are retained if a later part of lifting fails.
     pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {
         let new = self
             .hostcall_fuel

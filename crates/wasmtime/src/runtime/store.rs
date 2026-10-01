@@ -1007,9 +1007,9 @@ impl<T> Store<T> {
     /// units, as any execution cost associated with them involves other
     /// instructions which do consume fuel.
     ///
-    /// Component lifting also consumes this budget at its existing hostcall-fuel
-    /// checks, at one unit of Store fuel per unit of hostcall fuel. Those
-    /// charges are retained even when lifting subsequently fails.
+    /// Component lifting consumes this budget as described in
+    /// [`Config::consume_fuel`](crate::Config::consume_fuel). Lifting charges
+    /// are not refunded if conversion subsequently fails.
     ///
     /// Note that when fuel is entirely consumed it will cause wasm to trap.
     ///
@@ -1524,9 +1524,8 @@ fn set_fuel(
     *injected_fuel = -(injected as i64);
 }
 
+// Borrow fuel separately so lifting can also borrow component state.
 #[cfg(feature = "component-model")]
-// Lifting borrows component state at the same time, so expose only the disjoint
-// fuel fields rather than borrowing the entire StoreOpaque.
 pub(crate) struct StoreFuel<'a> {
     injected: &'a mut i64,
     reserve: &'a mut u64,
@@ -1548,7 +1547,8 @@ impl StoreFuel<'_> {
             return Ok(());
         }
 
-        // Spend active fuel first so this also advances the next async yield.
+        // Spend active fuel first to advance the next guest yield. Refilling
+        // the active batch here would restart the yield interval.
         let active = self.injected.unsigned_abs();
         if amount <= active {
             *self.injected += amount as i64;
@@ -1567,7 +1567,8 @@ impl StoreOpaque {
         &mut self,
     ) -> (&mut ComponentStoreData, Option<StoreFuel<'_>>) {
         let fuel = self.engine.tunables().consume_fuel.then(|| StoreFuel {
-            // Guest execution is paused while component values are lifted.
+            // SAFETY: The store is exclusively borrowed, and lifting does not
+            // reenter Wasm while holding these references.
             injected: unsafe { &mut *self.vm_store_context.fuel_consumed.get() },
             reserve: &mut self.fuel_reserve,
         });

@@ -519,12 +519,10 @@ impl<T> Store<T> {
     ///
     /// The default value for this is 128 MiB.
     ///
-    /// When [`crate::Config::consume_fuel`] is enabled, consuming hostcall fuel
-    /// also deducts the same amount from [`Store::get_fuel`]. This shared
-    /// budget applies across lifts and Wasm execution. The per-lift limit
-    /// configured here still applies independently, and exhausting it does
-    /// not deduct the rejected charge from Store fuel. Accepted charges are
-    /// retained if lifting subsequently fails.
+    /// When [`crate::Config::consume_fuel`] is enabled, each unit of hostcall
+    /// fuel consumed also consumes one unit of Store fuel. This per-lift limit
+    /// is checked first: a charge rejected by this limit leaves the Store fuel
+    /// balance unchanged.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }
