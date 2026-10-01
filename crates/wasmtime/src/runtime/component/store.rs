@@ -4,7 +4,7 @@ use crate::runtime::vm;
 use crate::runtime::vm::component::{
     CallContext, ComponentInstance, HandleTable, OwnedComponentInstance,
 };
-use crate::store::{StoreData, StoreId, StoreOpaque};
+use crate::store::{StoreData, StoreFuel, StoreId, StoreOpaque};
 use crate::{AsContext, AsContextMut, Engine, Store, StoreContextMut};
 use core::pin::Pin;
 use wasmtime_environ::component::RuntimeComponentInstanceIndex;
@@ -364,10 +364,11 @@ impl StoreOpaque {
         &mut HandleTable,
         &mut HostResourceData,
         Pin<&mut ComponentInstance>,
+        Option<StoreFuel<'_>>,
     ) {
         let instance = instance.id();
         instance.assert_belongs_to(self.id());
-        let data = self.component_data_mut();
+        let (data, fuel) = self.component_data_and_fuel_mut();
         (
             &mut data.task_state,
             &mut data.component_host_table,
@@ -376,6 +377,7 @@ impl StoreOpaque {
                 .as_mut()
                 .unwrap()
                 .get_mut(),
+            fuel,
         )
     }
 
@@ -506,6 +508,11 @@ impl<T> Store<T> {
     /// guest to the host is limited.
     ///
     /// The default value for this is 128 MiB.
+    ///
+    /// When [`crate::Config::consume_fuel`] is enabled, each unit of hostcall
+    /// fuel consumed also consumes one unit of Store fuel. This per-lift limit
+    /// is checked first: a charge rejected by this limit leaves the Store fuel
+    /// balance unchanged.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }
