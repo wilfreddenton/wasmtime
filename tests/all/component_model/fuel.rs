@@ -1,12 +1,13 @@
-use super::ApiStyle;
-use crate::async_functions::PollOnce;
+use super::{ApiStyle, config};
+use crate::async_functions::CountPending;
 use std::mem::size_of;
 use std::pin::{Pin, pin};
+use std::str::Utf8Error;
 use std::task::{Context, Poll};
 use wasmtime::component::{
     Component, Linker, Source, StreamConsumer, StreamReader, StreamResult, Val,
 };
-use wasmtime::{Config, Engine, Result, Store, StoreContextMut, Trap};
+use wasmtime::{Engine, Result, Store, StoreContextMut, Trap};
 
 fn component(engine: &Engine) -> Result<Component> {
     Component::new(
@@ -33,7 +34,7 @@ fn component(engine: &Engine) -> Result<Component> {
 
 #[test]
 fn dynamic_results_share_instruction_fuel_and_retain_failed_work() -> Result<()> {
-    let engine = Engine::new(Config::new().consume_fuel(true))?;
+    let engine = Engine::new(config().consume_fuel(true))?;
     let component = component(&engine)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
@@ -54,7 +55,7 @@ fn dynamic_results_share_instruction_fuel_and_retain_failed_work() -> Result<()>
 
     store.set_fuel(cost)?;
     let error = invalid.call(&mut store, &[], &mut results).unwrap_err();
-    assert!(error.downcast_ref::<Trap>().is_none());
+    assert!(error.downcast_ref::<Utf8Error>().is_some());
     assert_eq!(store.get_fuel()?, 0);
 
     let mut store = Store::new(&engine, ());
@@ -80,9 +81,6 @@ async fn typed_results_charge_in_all_call_styles() -> Result<()> {
         let engine = Engine::new(&config)?;
         let component = component(&engine)?;
         let mut store = Store::new(&engine, ());
-        if !matches!(style, ApiStyle::Sync) {
-            store.fuel_async_yield_interval(Some(10))?;
-        }
         let instance = style
             .instantiate(&mut store, &Linker::new(&engine), &component)
             .await?;
@@ -129,27 +127,19 @@ async fn lifting_exhausts_the_active_batch_before_the_next_guest_call() -> Resul
 
         for (first, bytes) in [(empty, 0), (valid, 16)] {
             store.set_fuel(10_000)?;
-            {
-                let mut call = pin!(style.call(&mut store, first, ()));
-                let Ok(result) = PollOnce::new(call.as_mut()).await else {
-                    panic!("lifting should complete without yielding");
-                };
-                assert_eq!(result?.0.len(), bytes);
-            }
+            let (result, pending) =
+                CountPending::new(pin!(style.call(&mut store, first, ()))).await;
+            assert_eq!(result?.0.len(), bytes);
+            assert_eq!(pending, 0, "lifting should complete without yielding");
             assert_eq!(store.get_fuel()?, 10_000 - instructions - bytes as u64);
-            {
-                let mut call = pin!(style.call(&mut store, empty, ()));
-                match PollOnce::new(call.as_mut()).await {
-                    Err(call) => {
-                        assert_eq!(bytes, 16, "an empty lift must not exhaust the batch");
-                        assert_eq!(call.await?.0, "");
-                    }
-                    Ok(result) => {
-                        result?;
-                        assert_eq!(bytes, 0, "the string lift must advance the next yield");
-                    }
-                }
-            }
+            let (result, pending) =
+                CountPending::new(pin!(style.call(&mut store, empty, ()))).await;
+            assert_eq!(result?.0, "");
+            assert_eq!(
+                pending,
+                usize::from(bytes != 0),
+                "only the string lift should advance the next yield"
+            );
             assert_eq!(store.get_fuel()?, 10_000 - 2 * instructions - bytes as u64);
         }
     }
@@ -271,7 +261,7 @@ async fn stream_lifting_exhaustion_retains_accepted_items_and_charges() -> Resul
 #[test]
 fn per_lift_allowance_applies_with_or_without_store_fuel() -> Result<()> {
     for enabled in [false, true] {
-        let engine = Engine::new(Config::new().consume_fuel(enabled))?;
+        let engine = Engine::new(config().consume_fuel(enabled))?;
         let component = component(&engine)?;
         for allowance in [15, 16] {
             let mut store = Store::new(&engine, ());
@@ -318,7 +308,7 @@ fn per_lift_allowance_applies_with_or_without_store_fuel() -> Result<()> {
 
 #[test]
 fn imported_arguments_are_charged_before_entering_the_host() -> Result<()> {
-    let engine = Engine::new(Config::new().consume_fuel(true))?;
+    let engine = Engine::new(config().consume_fuel(true))?;
     let component = Component::new(
         &engine,
         r#"(component
