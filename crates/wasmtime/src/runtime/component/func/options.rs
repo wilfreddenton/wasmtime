@@ -1,4 +1,5 @@
 use crate::StoreContextMut;
+use crate::Trap;
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent::ConcurrentState;
 use crate::component::matching::InstanceType;
@@ -10,7 +11,7 @@ use crate::runtime::vm::component::{
     ComponentInstance, CurrentScope, HandleCounter, HandleTable, ResourceTables,
 };
 use crate::runtime::vm::{UncaughtException, VMFuncRef};
-use crate::store::{StoreId, StoreOpaque};
+use crate::store::{StoreFuel, StoreId, StoreOpaque};
 use alloc::sync::Arc;
 use core::fmt;
 use core::pin::Pin;
@@ -364,6 +365,7 @@ pub struct LiftContext<'a> {
     /// This is decremented for strings/lists, for example, to cap the size of
     /// data the host allocates on behalf of the guest.
     hostcall_fuel: usize,
+    store_fuel: Option<StoreFuel<'a>>,
 }
 
 #[doc(hidden)]
@@ -386,7 +388,7 @@ impl<'a> LiftContext<'a> {
         // at this time.
         let memory =
             instance_handle.options_memory(unsafe { &*(store as *const StoreOpaque) }, options);
-        let (task_state, host_table, handle_counter, host_resource_data, instance) =
+        let (task_state, host_table, handle_counter, host_resource_data, instance, store_fuel) =
             store.lift_context_parts(instance_handle);
         let (component, instance) = instance.component_and_self();
 
@@ -403,6 +405,7 @@ impl<'a> LiftContext<'a> {
             handle_counter,
             host_resource_data,
             hostcall_fuel,
+            store_fuel,
         })
     }
 
@@ -532,14 +535,18 @@ impl<'a> LiftContext<'a> {
     /// Consumes `amt` units of fuel, typically a number of bytes, from this
     /// context.
     ///
-    /// Returns an error if the fuel is exhausted which will cause a trap in the
-    /// guest. Note that this is distinct from Wasm's fuel, this is just for
-    /// keeping track of data flowing from the guest to the host.
+    /// Checks the per-lift allowance before charging Store fuel when fuel
+    /// consumption is enabled. Returns an error if either budget is insufficient.
+    /// Accepted charges are retained if a later part of lifting fails.
     pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {
-        match self.hostcall_fuel.checked_sub(amt) {
-            Some(new) => self.hostcall_fuel = new,
-            None => bail!(HostcallFuelExhausted),
+        let new = self
+            .hostcall_fuel
+            .checked_sub(amt)
+            .ok_or(HostcallFuelExhausted)?;
+        if let Some(fuel) = &mut self.store_fuel {
+            fuel.consume(u64::try_from(amt).map_err(|_| Trap::OutOfFuel)?)?;
         }
+        self.hostcall_fuel = new;
         Ok(())
     }
 
