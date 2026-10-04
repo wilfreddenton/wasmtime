@@ -527,13 +527,19 @@ impl<'a> LiftContext<'a> {
     }
 
     /// Same as [`Self::consume_fuel`], but safely multiplies `len` and `size`
-    /// together before calling that.
+    /// together before calling that. Charges at least one unit per element:
+    /// a zero-sized Rust representation can still require validation or table
+    /// storage.
     pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
-        match len.checked_mul(size) {
+        match array_fuel(len, size) {
             Some(bytes) => self.consume_fuel(bytes),
             None => bail!(HostcallFuelExhausted),
         }
     }
+}
+
+fn array_fuel(len: usize, size: usize) -> Option<usize> {
+    len.checked_mul(size.max(1))
 }
 
 #[derive(Debug)]
@@ -546,6 +552,29 @@ impl fmt::Display for HostcallFuelExhausted {
             "too much data is being copied between the host and the guest: \
              fuel allocated for hostcalls has been exhausted"
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::array_fuel;
+
+    #[test]
+    fn zero_sized_elements_have_a_count_bound() {
+        for count in [1, 7, usize::MAX] {
+            assert_eq!(array_fuel(count, 0), Some(count));
+            assert_eq!(array_fuel(count, 0), array_fuel(count, 1));
+        }
+    }
+
+    #[test]
+    fn array_fuel_preserves_empty_lists_and_checked_sizes() {
+        for size in [0, 1, 48, usize::MAX] {
+            assert_eq!(array_fuel(0, size), Some(0));
+        }
+        assert_eq!(array_fuel(7, 48), Some(336));
+        assert_eq!(array_fuel(1, usize::MAX), Some(usize::MAX));
+        assert_eq!(array_fuel(2, usize::MAX), None);
     }
 }
 
