@@ -555,6 +555,8 @@ impl fmt::Display for HostcallFuelExhausted {
     }
 }
 
+impl core::error::Error for HostcallFuelExhausted {}
+
 #[cfg(test)]
 mod tests {
     use super::array_fuel;
@@ -577,5 +579,3 @@ mod tests {
         assert_eq!(array_fuel(2, usize::MAX), None);
     }
 }
-
-impl core::error::Error for HostcallFuelExhausted {}

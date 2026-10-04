@@ -502,7 +502,7 @@ impl<T> Store<T> {
     ///
     /// The `fuel` value here should roughly corresponds to the maximal number
     /// of bytes that the guest may transfer to the host in one call.
-    /// Collection elements consume at least one unit each, even when their
+    /// Collection charges consume at least one unit per element, even when its
     /// Rust representation is zero-sized. This count bound applies regardless
     /// of whether Store fuel consumption is enabled.
     ///
