@@ -5,9 +5,16 @@ use std::pin::{Pin, pin};
 use std::str::Utf8Error;
 use std::task::{Context, Poll};
 use wasmtime::component::{
-    Component, Linker, Source, StreamConsumer, StreamReader, StreamResult, Val,
+    Component, ComponentType, Lift, Linker, Source, StreamConsumer, StreamReader, StreamResult, Val,
 };
 use wasmtime::{Engine, Result, Store, StoreContextMut, Trap};
+
+#[derive(ComponentType, Lift, Clone, Debug, PartialEq)]
+#[component(variant)]
+enum ZeroSizedVariant {
+    #[component(name = "only")]
+    Only,
+}
 
 fn component(engine: &Engine) -> Result<Component> {
     Component::new(
@@ -30,6 +37,52 @@ fn component(engine: &Engine) -> Result<Component> {
             (func (export "invalid") (result string)
                 (canon lift (core func $i "invalid") (memory (core memory $i "memory")))))"#,
     )
+}
+
+#[test]
+fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
+    // A canonical variant tag still needs lifting despite having no native storage.
+    assert_eq!(size_of::<ZeroSizedVariant>(), 0);
+    assert_eq!(ZeroSizedVariant::SIZE32, 1);
+    for enabled in [false, true] {
+        let engine = Engine::new(config().consume_fuel(enabled))?;
+        let component = Component::new(
+            &engine,
+            r#"(component
+                (type $item' (variant (case "only")))
+                (export $item "item" (type $item'))
+                (core module $m
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "\10\00\00\00")
+                    (func (export "run") (param i32) (result i32)
+                        (i32.store (i32.const 4) (local.get 0))
+                        (i32.const 0)))
+                (core instance $i (instantiate $m))
+                (func (export "run") (param "length" u32) (result (list $item))
+                    (canon lift (core func $i "run")
+                        (memory (core memory $i "memory")))))"#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(u32,), (Vec<ZeroSizedVariant>,)>(&mut store, "run")?;
+        let mut instructions = 0;
+        for length in [0, 1, 3] {
+            if enabled {
+                store.set_fuel(10_000)?;
+            }
+            store.set_hostcall_fuel(length as usize);
+            let (values,) = run.call(&mut store, (length,))?;
+            assert_eq!(values, vec![ZeroSizedVariant::Only; length as usize]);
+            if enabled {
+                let consumed = 10_000 - store.get_fuel()?;
+                if length == 0 {
+                    instructions = consumed;
+                }
+                assert_eq!(consumed, instructions + u64::from(length));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]
