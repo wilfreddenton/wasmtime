@@ -1757,7 +1757,7 @@ where
 /// itself, it does not represent validity of the elements themselves and that's
 /// performed when they're iterated. Lifting elements through [`Self::get`] or
 /// [`Self::iter`] can consume additional fuel and fail if either the hostcall
-/// allowance or Store fuel is exhausted.
+/// allowance or Store fuel is insufficient.
 ///
 /// Note that this type does not implement the [`Lower`] trait, only [`Lift`].
 pub struct WasmList<T> {
@@ -1804,13 +1804,12 @@ impl<T: Lift> WasmList<T> {
 
     /// Gets the `n`th element of this list.
     ///
-    /// Returns `None` if `index` is out of bounds. Returns `Some(Err(..))` if
-    /// the value could not be lifted. Returns `Some(Ok(..))`
-    /// if the value is valid.
+    /// Returns `None` if `index` is out of bounds, or `Some` containing the
+    /// result of lifting the element.
     ///
     /// # Panics
     ///
-    /// This function will panic if the string did not originally come from the
+    /// This function will panic if the list did not originally come from the
     /// `store` specified.
     //
     // TODO: given that interface values are intended to be consumed in one go

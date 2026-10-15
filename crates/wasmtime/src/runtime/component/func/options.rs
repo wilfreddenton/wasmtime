@@ -537,7 +537,7 @@ impl<'a> LiftContext<'a> {
     ///
     /// Checks the per-lift allowance before charging Store fuel when fuel
     /// consumption is enabled. Returns an error if either budget is insufficient.
-    /// Accepted charges are retained if a later part of lifting fails.
+    /// Store fuel is not refunded if a later part of lifting fails.
     pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {
         let new = self
             .hostcall_fuel
@@ -550,10 +550,9 @@ impl<'a> LiftContext<'a> {
         Ok(())
     }
 
-    /// Same as [`Self::consume_fuel`], but safely multiplies `len` and `size`
-    /// together before calling that. Charges at least one unit per element:
-    /// a zero-sized Rust representation can still require validation or table
-    /// storage.
+    /// Consumes `len * max(size, 1)` units of fuel, with checked multiplication.
+    ///
+    /// Zero-sized Rust elements can still require validation or table storage.
     pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
         match array_fuel(len, size) {
             Some(bytes) => self.consume_fuel(bytes),

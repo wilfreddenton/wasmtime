@@ -558,11 +558,10 @@ impl<T> Store<T> {
     /// applicable. The `fuel` provided here will be the initial value for each
     /// time the guest calls the host.
     ///
-    /// The `fuel` value here should roughly corresponds to the maximal number
-    /// of bytes that the guest may transfer to the host in one call.
-    /// Collection charges consume at least one unit per element, even when its
-    /// Rust representation is zero-sized. This count bound applies regardless
-    /// of whether Store fuel consumption is enabled.
+    /// The `fuel` value roughly corresponds to the maximal number of bytes
+    /// that the guest may transfer to the host in one call. Collection charges
+    /// use at least one unit per element, even when the element's Rust
+    /// representation is zero-sized.
     ///
     /// Note that data transferred from the host to the guest is not limited
     /// because it's already resident on the host itself. Only data from the
@@ -570,10 +569,8 @@ impl<T> Store<T> {
     ///
     /// The default value for this is 128 MiB.
     ///
-    /// When [`crate::Config::consume_fuel`] is enabled, each unit of hostcall
-    /// fuel consumed also consumes one unit of Store fuel. This per-lift limit
-    /// is checked first: a charge rejected by this limit leaves the Store fuel
-    /// balance unchanged.
+    /// With [`crate::Config::consume_fuel`] enabled, each unit consumed also
+    /// consumes one unit of Store fuel. This allowance is checked first.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

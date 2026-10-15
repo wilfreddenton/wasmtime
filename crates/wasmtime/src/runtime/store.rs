@@ -1010,9 +1010,7 @@ impl<T> Store<T> {
     /// units, as any execution cost associated with them involves other
     /// instructions which do consume fuel.
     ///
-    /// Component lifting consumes this budget as described in
-    /// [`Config::consume_fuel`](crate::Config::consume_fuel). Lifting charges
-    /// are not refunded if conversion subsequently fails.
+    /// Fuel consumed by component lifting is not refunded if conversion fails.
     ///
     /// Note that when fuel is entirely consumed it will cause wasm to trap.
     ///
@@ -1051,8 +1049,7 @@ impl<T> Store<T> {
     ///
     /// The `interval` parameter indicates how much fuel should be
     /// consumed between yields of an async future. When fuel runs out wasm will trap.
-    /// Component lifting consumes fuel synchronously without yielding; its
-    /// charges advance the next guest yield.
+    /// Component lifting counts toward this interval but does not itself yield.
     ///
     /// For limitations related to consumption of fuel and when yield points are
     /// injected, see the discussion in
