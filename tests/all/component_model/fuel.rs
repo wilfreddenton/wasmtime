@@ -142,11 +142,11 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
             0
         };
         let cost = 2 * size_of::<(u32, u32)>();
-        for (allowance, fuel) in [
-            (cost, 10_000),
-            (cost - 1, 10_000),
-            (cost, instructions + cost as u64 - 1),
-        ] {
+        let mut budgets = vec![(cost, 10_000), (cost - 1, 10_000)];
+        if enabled {
+            budgets.push((cost, instructions + cost as u64 - 1));
+        }
+        for (allowance, fuel) in budgets {
             let mut store = Store::new(&engine, ());
             let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
             let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
