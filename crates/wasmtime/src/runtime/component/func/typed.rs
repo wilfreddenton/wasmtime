@@ -1755,7 +1755,9 @@ where
 ///
 /// Note that this type represents only a valid range of bytes for the list
 /// itself, it does not represent validity of the elements themselves and that's
-/// performed when they're iterated.
+/// performed when they're iterated. Lifting elements through [`Self::get`] or
+/// [`Self::iter`] can consume additional fuel and fail if either the hostcall
+/// allowance or Store fuel is exhausted.
 ///
 /// Note that this type does not implement the [`Lower`] trait, only [`Lift`].
 pub struct WasmList<T> {
@@ -1803,7 +1805,7 @@ impl<T: Lift> WasmList<T> {
     /// Gets the `n`th element of this list.
     ///
     /// Returns `None` if `index` is out of bounds. Returns `Some(Err(..))` if
-    /// the value couldn't be decoded (it was invalid). Returns `Some(Ok(..))`
+    /// the value could not be lifted. Returns `Some(Ok(..))`
     /// if the value is valid.
     ///
     /// # Panics

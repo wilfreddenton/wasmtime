@@ -634,8 +634,10 @@ impl Config {
     /// [`crate::Store::fuel_async_yield_interval`].
     ///
     /// Component lifting also consumes this budget at its hostcall-fuel checks,
-    /// at one unit of Store fuel per unit of hostcall fuel. Host-side lowering
-    /// work is not charged; guest allocator instructions consume fuel as usual.
+    /// at one unit of Store fuel per unit of hostcall fuel. Charges depend on
+    /// native Rust representations and may vary across platforms or bindings.
+    /// Host-side lowering work is not charged; guest allocator instructions
+    /// consume fuel as usual.
     ///
     /// Note that a [`Store`] starts with no fuel, so if you enable this option
     /// you'll have to be sure to pour some fuel into [`Store`] before

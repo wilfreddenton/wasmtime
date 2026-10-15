@@ -1051,6 +1051,8 @@ impl<T> Store<T> {
     ///
     /// The `interval` parameter indicates how much fuel should be
     /// consumed between yields of an async future. When fuel runs out wasm will trap.
+    /// Component lifting consumes fuel synchronously without yielding; its
+    /// charges advance the next guest yield.
     ///
     /// For limitations related to consumption of fuel and when yield points are
     /// injected, see the discussion in
