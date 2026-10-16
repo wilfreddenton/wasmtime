@@ -1576,9 +1576,7 @@ impl StoreOpaque {
         &mut self,
     ) -> (&mut ComponentStoreData, Option<StoreFuel<'_>>) {
         let fuel = self.engine.tunables().consume_fuel.then(|| StoreFuel {
-            // SAFETY: The store is exclusively borrowed, and lifting does not
-            // reenter Wasm while holding these references.
-            injected: unsafe { &mut *self.vm_store_context.fuel_consumed.get() },
+            injected: self.vm_store_context.fuel_consumed.get_mut(),
             reserve: &mut self.fuel_reserve,
         });
         (&mut self.store_data.components, fuel)

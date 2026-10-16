@@ -1,5 +1,3 @@
-use crate::StoreContextMut;
-use crate::Trap;
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent::ConcurrentState;
 use crate::component::matching::InstanceType;
@@ -12,6 +10,7 @@ use crate::runtime::vm::component::{
 };
 use crate::runtime::vm::{UncaughtException, VMFuncRef};
 use crate::store::{StoreFuel, StoreId, StoreOpaque};
+use crate::{StoreContextMut, Trap};
 use alloc::sync::Arc;
 use core::fmt;
 use core::pin::Pin;
