@@ -41,6 +41,7 @@ fn string_fixture(config: &Config) -> Result<(Store<()>, Func, u64)> {
     let engine = Engine::new(config)?;
     let component = string_component(&engine)?;
     let mut store = Store::new(&engine, ());
+    store.set_fuel(u64::MAX)?;
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_func(&mut store, "run").unwrap();
     let mut results = [Val::Bool(false)];
@@ -124,6 +125,9 @@ fn zero_sized_typed_list_elements_charge_by_count(config: &Config) -> Result<()>
                     (memory (core memory $i "memory")))))"#,
     )?;
     let mut store = Store::new(&engine, ());
+    if instruction_fuel {
+        store.set_fuel(u64::MAX)?;
+    }
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(u32,), (Vec<ZeroSizedVariant>,)>(&mut store, "run")?;
     if instruction_fuel {
@@ -191,6 +195,9 @@ fn map_fixture(
                     (memory (core memory $i "memory")))))"#,
     )?;
     let mut store = Store::new(&engine, ());
+    if engine.get_consume_fuel() {
+        store.set_fuel(u64::MAX)?;
+    }
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
     let instructions = if engine.get_consume_fuel() {
@@ -309,6 +316,7 @@ fn lazy_list_fixture() -> Result<(Store<()>, TypedFunc<(u32,), (WasmList<String>
                     (memory (core memory $i "memory")))))"#,
     )?;
     let mut store = Store::new(&engine, ());
+    store.set_fuel(u64::MAX)?;
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(u32,), (WasmList<String>,)>(&mut store, "run")?;
     store.set_fuel(10_000)?;
@@ -402,6 +410,7 @@ fn failed_lifting_retains_fuel_charges() -> Result<()> {
     let engine = Engine::new(config().consume_fuel(true).consume_lifting_fuel(true))?;
     let component = string_component(&engine)?;
     let mut store = Store::new(&engine, ());
+    store.set_fuel(u64::MAX)?;
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_func(&mut store, "run").unwrap();
     let mut results = [Val::Bool(false)];
@@ -443,6 +452,7 @@ async fn typed_results_charge_fuel(style: ApiStyle) -> Result<()> {
     let engine = Engine::new(&config)?;
     let component = string_component(&engine)?;
     let mut store = Store::new(&engine, ());
+    store.set_fuel(u64::MAX)?;
     let instance = style
         .instantiate(&mut store, &Linker::new(&engine), &component)
         .await?;
@@ -477,6 +487,7 @@ async fn lifting_advances_next_yield(style: ApiStyle) -> Result<()> {
     let engine = Engine::new(&config)?;
     let component = string_component(&engine)?;
     let mut store = Store::new(&engine, ());
+    store.set_fuel(u64::MAX)?;
     let instance = style
         .instantiate(&mut store, &Linker::new(&engine), &component)
         .await?;
@@ -546,7 +557,7 @@ async fn stream_writer(
     component: &Component,
 ) -> Result<(Store<StreamFuelState>, TypedFunc<(), (u32,)>)> {
     let mut store = Store::new(component.engine(), StreamFuelState::default());
-    store.set_fuel(10_000)?;
+    store.set_fuel(u64::MAX)?;
     let instance = style
         .instantiate(&mut store, &Linker::new(component.engine()), component)
         .await?;
@@ -686,6 +697,7 @@ fn imported_arguments_are_charged_before_entering_the_host(dynamic: bool) -> Res
         )?;
     }
     let mut store = Store::new(&engine, Vec::new());
+    store.set_fuel(u64::MAX)?;
     let instance = linker.instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(u32,), ()>(&mut store, "run")?;
     store.set_fuel(10_000)?;
