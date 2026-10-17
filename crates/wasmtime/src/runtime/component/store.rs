@@ -569,8 +569,8 @@ impl<T> Store<T> {
     ///
     /// The default value for this is 128 MiB.
     ///
-    /// With [`crate::Config::consume_fuel`] enabled, each unit consumed also
-    /// consumes one unit of Store fuel. This allowance is checked first.
+    /// With [`crate::Config::consume_lifting_fuel`] enabled, each unit consumed
+    /// also consumes one unit of Store fuel. This allowance is checked first.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

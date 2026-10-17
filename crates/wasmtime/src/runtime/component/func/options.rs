@@ -534,7 +534,7 @@ impl<'a> LiftContext<'a> {
     /// Consumes `amt` units of fuel, typically a number of bytes, from this
     /// context.
     ///
-    /// Checks the per-lift allowance before charging Store fuel when fuel
+    /// Checks the per-lift allowance before charging Store fuel when lifting fuel
     /// consumption is enabled. Returns an error if either budget is insufficient.
     /// Store fuel is not refunded if a later part of lifting fails.
     pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {

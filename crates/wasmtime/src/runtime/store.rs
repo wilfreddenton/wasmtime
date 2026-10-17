@@ -1047,7 +1047,8 @@ impl<T> Store<T> {
     ///
     /// The `interval` parameter indicates how much fuel should be
     /// consumed between yields of an async future. When fuel runs out wasm will trap.
-    /// Component lifting counts toward this interval but does not itself yield.
+    /// Fuel consumed by component lifting counts toward this interval, but
+    /// lifting does not itself yield.
     ///
     /// For limitations related to consumption of fuel and when yield points are
     /// injected, see the discussion in
@@ -1573,10 +1574,14 @@ impl StoreOpaque {
     pub(crate) fn component_data_and_fuel_mut(
         &mut self,
     ) -> (&mut ComponentStoreData, Option<StoreFuel<'_>>) {
-        let fuel = self.engine.tunables().consume_fuel.then(|| StoreFuel {
-            injected: self.vm_store_context.fuel_consumed.get_mut(),
-            reserve: &mut self.fuel_reserve,
-        });
+        let fuel = self
+            .engine
+            .config()
+            .consume_lifting_fuel
+            .then(|| StoreFuel {
+                injected: self.vm_store_context.fuel_consumed.get_mut(),
+                reserve: &mut self.fuel_reserve,
+            });
         (&mut self.store_data.components, fuel)
     }
 

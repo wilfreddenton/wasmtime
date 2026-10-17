@@ -42,12 +42,76 @@ fn component(engine: &Engine) -> Result<Component> {
 }
 
 #[test]
+fn lifting_fuel_requires_instruction_fuel() -> Result<()> {
+    let mut config = config();
+    config.consume_lifting_fuel(true);
+    for instruction_fuel in [None, Some(false)] {
+        if let Some(enabled) = instruction_fuel {
+            config.consume_fuel(enabled);
+        }
+        let error = Engine::new(&config).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("consume_lifting_fuel requires consume_fuel")
+        );
+    }
+    config.consume_fuel(true);
+    assert!(Engine::new(&config)?.get_consume_lifting_fuel());
+    config.consume_fuel(false).consume_lifting_fuel(false);
+    assert!(!Engine::new(&config)?.get_consume_lifting_fuel());
+    Ok(())
+}
+
+#[test]
+fn lifting_fuel_is_opt_in() -> Result<()> {
+    for lifting in [None, Some(false), Some(true)] {
+        let mut config = config();
+        config.consume_fuel(true);
+        if let Some(enabled) = lifting {
+            config.consume_lifting_fuel(enabled);
+        }
+        let engine = Engine::new(&config)?;
+        assert!(engine.get_consume_fuel());
+        assert_eq!(engine.get_consume_lifting_fuel(), lifting.unwrap_or(false));
+        let component = component(&engine)?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let empty = instance.get_func(&mut store, "empty").unwrap();
+        let valid = instance.get_func(&mut store, "valid").unwrap();
+        let mut results = [Val::Bool(false)];
+        store.set_fuel(10_000)?;
+        empty.call(&mut store, &[], &mut results)?;
+        let instructions = 10_000 - store.get_fuel()?;
+        store.set_fuel(10_000)?;
+        valid.call(&mut store, &[], &mut results)?;
+        assert!(matches!(&results[0], Val::String(text) if text == "abcdefghijklmnop"));
+        let lift_cost = if lifting == Some(true) { 16 } else { 0 };
+        assert_eq!(store.get_fuel()?, 10_000 - instructions - lift_cost);
+
+        store.set_fuel(instructions)?;
+        let result = valid.call(&mut store, &[], &mut results);
+        if lifting == Some(true) {
+            assert_eq!(
+                result.unwrap_err().downcast_ref::<Trap>(),
+                Some(&Trap::OutOfFuel)
+            );
+        } else {
+            result?;
+            assert!(matches!(&results[0], Val::String(text) if text == "abcdefghijklmnop"));
+        }
+        assert_eq!(store.get_fuel()?, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
     // A canonical variant tag still needs lifting despite having no native storage.
     assert_eq!(size_of::<ZeroSizedVariant>(), 0);
     assert_eq!(ZeroSizedVariant::SIZE32, 1);
-    for enabled in [false, true] {
-        let engine = Engine::new(config().consume_fuel(enabled))?;
+    for (enabled, lifting) in [(false, false), (true, false), (true, true)] {
+        let engine = Engine::new(config().consume_fuel(enabled).consume_lifting_fuel(lifting))?;
         let component = Component::new(
             &engine,
             r#"(component
@@ -80,7 +144,8 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
                 if length == 0 {
                     instructions = consumed;
                 }
-                assert_eq!(consumed, instructions + u64::from(length));
+                let lift_cost = if lifting { u64::from(length) } else { 0 };
+                assert_eq!(consumed, instructions + lift_cost);
             }
         }
 
@@ -107,11 +172,12 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
 
 #[test]
 fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
-    for enabled in [false, true] {
+    for (enabled, lifting) in [(false, false), (true, false), (true, true)] {
         let engine = Engine::new(
             config()
                 .wasm_component_model_map(true)
-                .consume_fuel(enabled),
+                .consume_fuel(enabled)
+                .consume_lifting_fuel(lifting),
         )?;
         let component = Component::new(
             &engine,
@@ -143,7 +209,7 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
         };
         let cost = 2 * size_of::<(u32, u32)>();
         let mut budgets = vec![(cost, 10_000), (cost - 1, 10_000)];
-        if enabled {
+        if lifting {
             budgets.push((cost, instructions + cost as u64 - 1));
         }
         for (allowance, fuel) in budgets {
@@ -174,7 +240,8 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
             } else {
                 assert_eq!(result?.0, HashMap::from([(1, 11), (2, 22)]));
                 if enabled {
-                    assert_eq!(store.get_fuel()?, fuel - instructions - cost as u64);
+                    let lift_cost = if lifting { cost as u64 } else { 0 };
+                    assert_eq!(store.get_fuel()?, fuel - instructions - lift_cost);
                 }
             }
             assert_eq!(store.hostcall_fuel(), allowance);
@@ -185,7 +252,7 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
 
 #[test]
 fn lazy_list_elements_charge_fuel_when_accessed() -> Result<()> {
-    let engine = Engine::new(config().consume_fuel(true))?;
+    let engine = Engine::new(config().consume_fuel(true).consume_lifting_fuel(true))?;
     let component = Component::new(
         &engine,
         r#"(component
@@ -242,7 +309,7 @@ fn lazy_list_elements_charge_fuel_when_accessed() -> Result<()> {
 
 #[test]
 fn dynamic_results_share_instruction_fuel_and_retain_failed_work() -> Result<()> {
-    let engine = Engine::new(config().consume_fuel(true))?;
+    let engine = Engine::new(config().consume_fuel(true).consume_lifting_fuel(true))?;
     let component = component(&engine)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
@@ -285,7 +352,7 @@ async fn typed_results_charge_in_all_call_styles() -> Result<()> {
         ApiStyle::Concurrent,
     ] {
         let mut config = style.config();
-        config.consume_fuel(true);
+        config.consume_fuel(true).consume_lifting_fuel(true);
         let engine = Engine::new(&config)?;
         let component = component(&engine)?;
         let mut store = Store::new(&engine, ());
@@ -317,7 +384,7 @@ async fn lifting_exhausts_the_active_batch_before_the_next_guest_call() -> Resul
         ApiStyle::Concurrent,
     ] {
         let mut config = style.config();
-        config.consume_fuel(true);
+        config.consume_fuel(true).consume_lifting_fuel(true);
         let engine = Engine::new(&config)?;
         let component = component(&engine)?;
         let mut store = Store::new(&engine, ());
@@ -390,7 +457,7 @@ impl StreamConsumer<StreamFuelState> for StringConsumer {
 async fn stream_lifting_exhaustion_retains_accepted_items_and_charges() -> Result<()> {
     for style in [ApiStyle::Async, ApiStyle::Concurrent] {
         let mut config = style.config();
-        config.consume_fuel(true);
+        config.consume_fuel(true).consume_lifting_fuel(true);
         let engine = Engine::new(&config)?;
         let component = Component::new(
             &engine,
@@ -468,8 +535,8 @@ async fn stream_lifting_exhaustion_retains_accepted_items_and_charges() -> Resul
 
 #[test]
 fn per_lift_allowance_applies_with_or_without_store_fuel() -> Result<()> {
-    for enabled in [false, true] {
-        let engine = Engine::new(config().consume_fuel(enabled))?;
+    for (enabled, lifting) in [(false, false), (true, false), (true, true)] {
+        let engine = Engine::new(config().consume_fuel(enabled).consume_lifting_fuel(lifting))?;
         let component = component(&engine)?;
         for allowance in [15, 16] {
             let mut store = Store::new(&engine, ());
@@ -505,7 +572,8 @@ fn per_lift_allowance_applies_with_or_without_store_fuel() -> Result<()> {
                 result?;
                 valid.call(&mut store, &[], &mut results)?;
                 if enabled {
-                    assert_eq!(store.get_fuel()?, 10_000 - 2 * (instructions + 16));
+                    let lift_cost = if lifting { 16 } else { 0 };
+                    assert_eq!(store.get_fuel()?, 10_000 - 2 * (instructions + lift_cost));
                 }
             }
             assert_eq!(store.hostcall_fuel(), allowance);
@@ -516,7 +584,7 @@ fn per_lift_allowance_applies_with_or_without_store_fuel() -> Result<()> {
 
 #[test]
 fn imported_arguments_are_charged_before_entering_the_host() -> Result<()> {
-    let engine = Engine::new(config().consume_fuel(true))?;
+    let engine = Engine::new(config().consume_fuel(true).consume_lifting_fuel(true))?;
     let component = Component::new(
         &engine,
         r#"(component
