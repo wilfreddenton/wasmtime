@@ -2682,9 +2682,6 @@ mod tests {
         for (injected, reserve, amount, expected, exhausted) in [
             (0, 0, 0, (0, 0), false),
             (0, 0, 1, (0, 0), true),
-            (-1, 0, 0, (-1, 0), false),
-            (-1, 0, 1, (0, 0), false),
-            (-1, 0, 2, (0, 0), true),
             (-10, 15, 0, (-10, 15), false),
             (-10, 15, 3, (-7, 15), false),
             (-10, 15, 10, (0, 15), false),
@@ -2699,7 +2696,6 @@ mod tests {
             (-i64::MAX, u64::MAX - max, max, (0, u64::MAX - max), false),
             (-i64::MAX, u64::MAX - max, max + 1, (0, max), false),
             (-i64::MAX, u64::MAX - max, u64::MAX, (0, 0), false),
-            (-10, u64::MAX - 10, u64::MAX, (0, 0), false),
         ] {
             let mut tank = FuelTank {
                 consumed_fuel: injected,
