@@ -4619,7 +4619,7 @@ impl Instance {
         ty: TransmitIndex,
         src_idx: u32,
     ) -> Result<TableId<TransmitHandle>> {
-        let (state, _, counter, _, instance) = store.lift_context_parts(self);
+        let (state, _, counter, _, instance, _) = store.lift_context_parts(self);
         lift_index_to_transmit(instance, counter, state.concurrent_state_mut(), ty, src_idx)
     }
 
@@ -4629,7 +4629,7 @@ impl Instance {
         ty: TransmitIndex,
         id: TableId<TransmitHandle>,
     ) -> Result<u32> {
-        let (state, _, counter, _, instance) = store.lift_context_parts(self);
+        let (state, _, counter, _, instance, _) = store.lift_context_parts(self);
         lower_transmit_to_index(instance, counter, state.concurrent_state_mut(), ty, id)
     }
 
