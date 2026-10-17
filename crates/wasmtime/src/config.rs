@@ -5277,3 +5277,28 @@ impl Engine {
         Vec::new().into_iter()
     }
 }
+
+#[cfg(all(test, feature = "component-model"))]
+mod tests {
+    use super::Config;
+    use crate::prelude::*;
+
+    #[test]
+    fn lifting_fuel_requires_instruction_fuel() -> Result<()> {
+        let mut config = Config::new();
+        config.consume_lifting_fuel(true);
+        let error = config.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("consume_lifting_fuel requires consume_fuel"),
+            "{error}"
+        );
+
+        config.consume_fuel(true);
+        config.validate()?;
+        config.consume_lifting_fuel(false).consume_fuel(false);
+        config.validate()?;
+        Ok(())
+    }
+}

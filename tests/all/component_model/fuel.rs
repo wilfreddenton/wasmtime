@@ -37,25 +37,6 @@ fn string_component(engine: &Engine) -> Result<Component> {
     )
 }
 
-#[test]
-fn lifting_fuel_requires_instruction_fuel() -> Result<()> {
-    let mut config = config();
-    config.consume_lifting_fuel(true);
-    let error = Engine::new(&config).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("consume_lifting_fuel requires consume_fuel"),
-        "{error}"
-    );
-
-    config.consume_fuel(true);
-    assert!(Engine::new(&config)?.get_consume_lifting_fuel());
-    config.consume_lifting_fuel(false);
-    assert!(!Engine::new(&config)?.get_consume_lifting_fuel());
-    Ok(())
-}
-
 fn string_fixture(config: &Config) -> Result<(Store<()>, Func, u64)> {
     let engine = Engine::new(config)?;
     let component = string_component(&engine)?;
