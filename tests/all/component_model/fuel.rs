@@ -9,7 +9,7 @@ use wasmtime::component::{
     Component, ComponentType, Lift, Linker, Source, StreamConsumer, StreamReader, StreamResult,
     TypedFunc, Val, WasmList,
 };
-use wasmtime::{Engine, Result, Store, StoreContextMut, Trap};
+use wasmtime::{Config, Engine, Result, Store, StoreContextMut, Trap};
 
 #[derive(ComponentType, Lift, Clone, Debug, PartialEq)]
 #[component(variant)]
@@ -173,96 +173,117 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
     Ok(())
 }
 
+fn map_fixture(
+    config: &Config,
+) -> Result<(Store<()>, TypedFunc<(u32,), (HashMap<u32, u32>,)>, u64)> {
+    let mut config = config.clone();
+    config.wasm_component_model_map(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(
+        &engine,
+        r#"(component
+            (core module $m
+                (memory (export "memory") 1)
+                (data (i32.const 0) "\08\00\00\00")
+                ;; Map entries (1, 11) and (2, 22).
+                (data (i32.const 8) "\01\00\00\00\0b\00\00\00")
+                (data (i32.const 16) "\02\00\00\00\16\00\00\00")
+                (func (export "run") (param $length i32) (result i32)
+                    (i32.store (i32.const 4) (local.get $length))
+                    (i32.const 0)))
+            (core instance $i (instantiate $m))
+            (func (export "run") (param "length" u32) (result (map u32 u32))
+                (canon lift (core func $i "run")
+                    (memory (core memory $i "memory")))))"#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
+    let instructions = if engine.get_consume_fuel() {
+        store.set_fuel(10_000)?;
+        run.call(&mut store, (0,))?;
+        let instructions = 10_000 - store.get_fuel()?;
+        store.set_fuel(10_000)?;
+        instructions
+    } else {
+        0
+    };
+    Ok((store, run, instructions))
+}
+
 #[test]
-fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
+fn map_charges_each_call() -> Result<()> {
     for (instruction_fuel, lifting_fuel) in [(false, false), (true, false), (true, true)] {
-        let engine = Engine::new(
-            config()
-                .wasm_component_model_map(true)
-                .consume_fuel(instruction_fuel)
-                .consume_lifting_fuel(lifting_fuel),
-        )?;
-        let component = Component::new(
-            &engine,
-            r#"(component
-                (core module $m
-                    (memory (export "memory") 1)
-                    (data (i32.const 0) "\08\00\00\00")
-                    ;; Map entries (1, 11) and (2, 22).
-                    (data (i32.const 8) "\01\00\00\00\0b\00\00\00")
-                    (data (i32.const 16) "\02\00\00\00\16\00\00\00")
-                    (func (export "run") (param $length i32) (result i32)
-                        (i32.store (i32.const 4) (local.get $length))
-                        (i32.const 0)))
-                (core instance $i (instantiate $m))
-                (func (export "run") (param "length" u32) (result (map u32 u32))
-                    (canon lift (core func $i "run")
-                        (memory (core memory $i "memory")))))"#,
-        )?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-        let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
-        if instruction_fuel {
-            store.set_fuel(10_000)?;
-        }
-        store.set_hostcall_fuel(0);
-        assert!(run.call(&mut store, (0,))?.0.is_empty());
-        let instructions = if instruction_fuel {
-            10_000 - store.get_fuel()?
-        } else {
-            0
-        };
+        let mut config = config();
+        config
+            .consume_fuel(instruction_fuel)
+            .consume_lifting_fuel(lifting_fuel);
+        let (mut store, run, instructions) = map_fixture(&config)?;
         let cost = 2 * size_of::<(u32, u32)>();
+
+        store.set_hostcall_fuel(0);
+        let (empty,) = run.call(&mut store, (0,))?;
         store.set_hostcall_fuel(cost);
-        if instruction_fuel {
-            store.set_fuel(10_000)?;
-        }
-        assert_eq!(
-            run.call(&mut store, (2,))?.0,
-            HashMap::from([(1, 11), (2, 22)])
-        );
-        // The hostcall allowance resets for each call, while Store fuel accumulates.
-        assert_eq!(
-            run.call(&mut store, (2,))?.0,
-            HashMap::from([(1, 11), (2, 22)])
-        );
+        let (first,) = run.call(&mut store, (2,))?;
+        let (second,) = run.call(&mut store, (2,))?;
+
+        assert!(empty.is_empty());
+        assert_eq!(first, HashMap::from([(1, 11), (2, 22)]));
+        assert_eq!(second, first);
         assert_eq!(store.hostcall_fuel(), cost);
         if instruction_fuel {
             let lift_cost = if lifting_fuel { cost as u64 } else { 0 };
-            assert_eq!(store.get_fuel()?, 10_000 - 2 * (instructions + lift_cost));
-            store.set_fuel(10_000)?;
-        }
-
-        store.set_hostcall_fuel(cost - 1);
-        let error = run.call(&mut store, (2,)).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("fuel allocated for hostcalls has been exhausted"),
-            "{error}"
-        );
-        assert_eq!(store.hostcall_fuel(), cost - 1);
-        if instruction_fuel {
-            assert_eq!(store.get_fuel()?, 10_000 - instructions);
-        }
-
-        if lifting_fuel {
-            let mut store = Store::new(&engine, ());
-            let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-            let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
-            store.set_hostcall_fuel(cost);
-            store.set_fuel(instructions + cost as u64 - 1)?;
-            let error = run.call(&mut store, (2,)).unwrap_err();
-            assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
-            assert_eq!(store.get_fuel()?, 0);
-            assert_eq!(store.hostcall_fuel(), cost);
+            assert_eq!(store.get_fuel()?, 10_000 - 3 * instructions - 2 * lift_cost);
         }
     }
     Ok(())
 }
 
 #[test]
-fn lazy_list_elements_charge_fuel_when_accessed() -> Result<()> {
+fn map_rejects_insufficient_hostcall_allowance() -> Result<()> {
+    for (instruction_fuel, lifting_fuel) in [(false, false), (true, false), (true, true)] {
+        let mut config = config();
+        config
+            .consume_fuel(instruction_fuel)
+            .consume_lifting_fuel(lifting_fuel);
+        let (mut store, run, instructions) = map_fixture(&config)?;
+        let allowance = 2 * size_of::<(u32, u32)>() - 1;
+        store.set_hostcall_fuel(allowance);
+
+        let error = run.call(&mut store, (2,)).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("fuel allocated for hostcalls has been exhausted"),
+            "{error}"
+        );
+        assert_eq!(store.hostcall_fuel(), allowance);
+        if instruction_fuel {
+            assert_eq!(store.get_fuel()?, 10_000 - instructions);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn map_rejects_insufficient_store_fuel() -> Result<()> {
+    let mut config = config();
+    config.consume_fuel(true).consume_lifting_fuel(true);
+    let (mut store, run, instructions) = map_fixture(&config)?;
+    let cost = 2 * size_of::<(u32, u32)>();
+    store.set_hostcall_fuel(cost);
+    store.set_fuel(instructions + cost as u64 - 1)?;
+
+    let error = run.call(&mut store, (2,)).unwrap_err();
+
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+    assert_eq!(store.get_fuel()?, 0);
+    assert_eq!(store.hostcall_fuel(), cost);
+    Ok(())
+}
+
+fn lazy_list_fixture() -> Result<(Store<()>, TypedFunc<(u32,), (WasmList<String>,)>)> {
     let engine = Engine::new(config().consume_fuel(true).consume_lifting_fuel(true))?;
     let component = Component::new(
         &engine,
@@ -286,36 +307,87 @@ fn lazy_list_elements_charge_fuel_when_accessed() -> Result<()> {
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(u32,), (WasmList<String>,)>(&mut store, "run")?;
     store.set_fuel(10_000)?;
-    assert_eq!(run.call(&mut store, (0,))?.0.len(), 0);
+    Ok((store, run))
+}
+
+#[test]
+fn lazy_list_creation_charges_storage() -> Result<()> {
+    let (mut store, run) = lazy_list_fixture()?;
+    let (empty,) = run.call(&mut store, (0,))?;
     let instructions = 10_000 - store.get_fuel()?;
     store.set_fuel(10_000)?;
-    let (list,) = run.call(&mut store, (2,))?;
-    let remaining = 10_000 - instructions - 2 * size_of::<String>() as u64;
-    assert_eq!(store.get_fuel()?, remaining);
-    assert_eq!(list.get(&mut store, 0).unwrap()?, "abc");
-    assert!(list.get(&mut store, 2).is_none());
-    assert_eq!(store.get_fuel()?, remaining - 3);
-    assert_eq!(
-        list.iter(&mut store)?.collect::<Result<Vec<_>>>()?,
-        ["abc", "def"]
-    );
-    assert_eq!(store.get_fuel()?, remaining - 9);
 
+    let (list,) = run.call(&mut store, (2,))?;
+
+    assert_eq!(empty.len(), 0);
+    assert_eq!(list.len(), 2);
+    assert_eq!(
+        store.get_fuel()?,
+        10_000 - instructions - 2 * size_of::<String>() as u64
+    );
+    Ok(())
+}
+
+#[test]
+fn lazy_list_get_charges_fuel() -> Result<()> {
+    let (mut store, run) = lazy_list_fixture()?;
+    let (list,) = run.call(&mut store, (2,))?;
+    store.set_fuel(10)?;
+
+    let value = list.get(&mut store, 0).unwrap()?;
+    let missing = list.get(&mut store, 2);
+
+    assert_eq!(value, "abc");
+    assert!(missing.is_none());
+    assert_eq!(store.get_fuel()?, 7);
+    Ok(())
+}
+
+#[test]
+fn lazy_list_get_exhausts_fuel() -> Result<()> {
+    let (mut store, run) = lazy_list_fixture()?;
+    let (list,) = run.call(&mut store, (2,))?;
     store.set_fuel(5)?;
-    assert_eq!(list.get(&mut store, 0).unwrap()?, "abc");
+
+    let first = list.get(&mut store, 0).unwrap()?;
     let error = list.get(&mut store, 1).unwrap().unwrap_err();
+
+    assert_eq!(first, "abc");
     assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
     assert_eq!(store.get_fuel()?, 0);
+    Ok(())
+}
 
+#[test]
+fn lazy_list_iter_charges_fuel() -> Result<()> {
+    let (mut store, run) = lazy_list_fixture()?;
+    let (list,) = run.call(&mut store, (2,))?;
+    store.set_fuel(10)?;
+
+    let values = list.iter(&mut store)?.collect::<Result<Vec<_>>>()?;
+
+    assert_eq!(values, ["abc", "def"]);
+    assert_eq!(store.get_fuel()?, 4);
+    Ok(())
+}
+
+#[test]
+fn lazy_list_iter_exhausts_fuel() -> Result<()> {
+    let (mut store, run) = lazy_list_fixture()?;
+    let (list,) = run.call(&mut store, (2,))?;
     store.set_fuel(5)?;
-    let error = {
+
+    let (first, error, finished) = {
         let mut values = list.iter(&mut store)?;
-        assert_eq!(values.next().unwrap()?, "abc");
+        let first = values.next().unwrap()?;
         let error = values.next().unwrap().unwrap_err();
-        assert!(values.next().is_none());
-        error
+        let finished = values.next().is_none();
+        (first, error, finished)
     };
+
+    assert_eq!(first, "abc");
     assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+    assert!(finished);
     assert_eq!(store.get_fuel()?, 0);
     Ok(())
 }
