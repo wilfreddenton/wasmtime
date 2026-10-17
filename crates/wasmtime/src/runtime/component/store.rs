@@ -4,7 +4,7 @@ use crate::runtime::vm;
 use crate::runtime::vm::component::{
     CallContext, ComponentInstance, HandleCounter, HandleTable, OwnedComponentInstance, Scope,
 };
-use crate::store::{StoreData, StoreId, StoreOpaque};
+use crate::store::{StoreData, StoreFuel, StoreId, StoreOpaque};
 use crate::{AsContext, AsContextMut, Engine, Store, StoreContextMut, bail_bug};
 use core::pin::Pin;
 use wasmtime_environ::component::RuntimeComponentInstanceIndex;
@@ -412,10 +412,11 @@ impl StoreOpaque {
         &mut HandleCounter,
         &mut HostResourceData,
         Pin<&mut ComponentInstance>,
+        Option<StoreFuel<'_>>,
     ) {
         let instance = instance.id();
         instance.assert_belongs_to(self.id());
-        let data = self.component_data_mut();
+        let (data, fuel) = self.component_data_and_fuel_mut();
         (
             &mut data.task_state,
             &mut data.component_host_table,
@@ -425,6 +426,7 @@ impl StoreOpaque {
                 .as_mut()
                 .unwrap()
                 .get_mut(),
+            fuel,
         )
     }
 
@@ -556,14 +558,20 @@ impl<T> Store<T> {
     /// applicable. The `fuel` provided here will be the initial value for each
     /// time the guest calls the host.
     ///
-    /// The `fuel` value here should roughly corresponds to the maximal number
-    /// of bytes that the guest may transfer to the host in one call.
+    /// The `fuel` value roughly corresponds to the maximal number of bytes
+    /// that the guest may transfer to the host in one call. Collection charges
+    /// use at least one unit per element, even when the element's Rust
+    /// representation is zero-sized.
     ///
     /// Note that data transferred from the host to the guest is not limited
     /// because it's already resident on the host itself. Only data from the
     /// guest to the host is limited.
     ///
     /// The default value for this is 128 MiB.
+    ///
+    /// With [`crate::Config::consume_lifting_fuel`] configured, each unit consumed
+    /// also consumes the configured amount of Store fuel. This allowance is
+    /// checked first and is not scaled by the Store fuel cost.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

@@ -164,6 +164,8 @@ pub struct Config {
     collector: Collector,
     profiling_strategy: ProfilingStrategy,
     tunables: ConfigTunables,
+    #[cfg(feature = "component-model")]
+    pub(crate) consume_lifting_fuel: Option<u64>,
 
     #[cfg(feature = "cache")]
     pub(crate) cache: Option<Cache>,
@@ -271,6 +273,8 @@ impl Config {
     pub fn new() -> Self {
         let mut ret = Self {
             tunables: ConfigTunables::default(),
+            #[cfg(feature = "component-model")]
+            consume_lifting_fuel: None,
             #[cfg(any(feature = "cranelift", feature = "winch"))]
             compiler_config: Some(CompilerConfig::default()),
             target: None,
@@ -642,6 +646,24 @@ impl Config {
     /// [`Store`]: crate::Store
     pub fn consume_fuel(&mut self, enable: bool) -> &mut Self {
         self.tunables.consume_fuel = Some(enable);
+        self
+    }
+
+    /// Configures the Store fuel cost per unit of component lifting fuel.
+    ///
+    /// `None` disables Store fuel charges for lifting. `Some(cost)` requires
+    /// [`Config::consume_fuel`] to be enabled and charges `cost` units of Store
+    /// fuel per unit of hostcall fuel. A cost of zero is allowed. The hostcall
+    /// allowance is checked first and is not scaled by this cost.
+    ///
+    /// Charges depend on native Rust representations and may vary across
+    /// platforms or bindings. Host-side lowering work is not charged.
+    /// Insufficient Store fuel or cost overflow exhausts the balance and traps.
+    ///
+    /// By default this option is `None`.
+    #[cfg(feature = "component-model")]
+    pub fn consume_lifting_fuel(&mut self, cost_per_unit: Option<u64>) -> &mut Self {
+        self.consume_lifting_fuel = cost_per_unit;
         self
     }
 
@@ -2793,6 +2815,11 @@ impl Config {
 
         self.tunables.configure(&mut tunables);
 
+        #[cfg(feature = "component-model")]
+        if self.consume_lifting_fuel.is_some() && !tunables.consume_fuel {
+            bail!("consume_lifting_fuel requires consume_fuel to be enabled");
+        }
+
         // If no GC heap tunables are explicitly configured, copy the memory
         // tunables' configured values so that GC heaps default to the same
         // configuration as linear memories.
@@ -3582,6 +3609,8 @@ impl fmt::Debug for Config {
         }
 
         f.field("parallel_compilation", &self.parallel_compilation);
+        #[cfg(feature = "component-model")]
+        f.field("consume_lifting_fuel", &self.consume_lifting_fuel);
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
             f.field("compiler_config", &self.compiler_config);
@@ -5140,6 +5169,12 @@ impl Engine {
     /// Returns the configured [`Config::consume_fuel`] value.
     pub fn get_consume_fuel(&self) -> bool {
         self.tunables().consume_fuel
+    }
+
+    /// Returns the configured [`Config::consume_lifting_fuel`] value.
+    #[cfg(feature = "component-model")]
+    pub fn get_consume_lifting_fuel(&self) -> Option<u64> {
+        self.config().consume_lifting_fuel
     }
 
     /// Returns the configured [`Config::max_wasm_stack`] value.
