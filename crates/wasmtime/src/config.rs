@@ -655,6 +655,7 @@ impl Config {
     /// check, lifting consumes one unit of Store fuel per unit of hostcall fuel.
     /// Charges depend on native Rust representations and may vary across
     /// platforms or bindings. Host-side lowering work is not charged.
+    /// Insufficient Store fuel exhausts the remaining balance and traps.
     ///
     /// By default this option is `false`.
     #[cfg(feature = "component-model")]
