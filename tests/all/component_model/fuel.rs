@@ -334,79 +334,98 @@ fn failed_lifting_retains_fuel_charges() -> Result<()> {
 }
 
 #[tokio::test]
-async fn typed_results_charge_in_all_call_styles() -> Result<()> {
-    for style in [
-        ApiStyle::Sync,
-        ApiStyle::Async,
-        ApiStyle::AsyncNotConcurrent,
-        ApiStyle::Concurrent,
-    ] {
-        let mut config = style.config();
-        config.consume_fuel(true).consume_lifting_fuel(true);
-        let engine = Engine::new(&config)?;
-        let component = string_component(&engine)?;
-        let mut store = Store::new(&engine, ());
-        let instance = style
-            .instantiate(&mut store, &Linker::new(&engine), &component)
-            .await?;
-        let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
-        store.set_fuel(10_000)?;
-        style.call(&mut store, run, (0,)).await?;
-        let cost = 10_000 - store.get_fuel()? + 16;
-        store.set_fuel(2 * cost)?;
-        assert_eq!(
-            style.call(&mut store, run, (16,)).await?.0,
-            "abcdefghijklmnop"
-        );
-        assert_eq!(store.get_fuel()?, cost);
-        style.call(&mut store, run, (16,)).await?;
-        assert_eq!(store.get_fuel()?, 0);
-    }
+async fn typed_results_charge_fuel_sync() -> Result<()> {
+    typed_results_charge_fuel(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn typed_results_charge_fuel_async() -> Result<()> {
+    typed_results_charge_fuel(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn typed_results_charge_fuel_async_not_concurrent() -> Result<()> {
+    typed_results_charge_fuel(ApiStyle::AsyncNotConcurrent).await
+}
+
+#[tokio::test]
+async fn typed_results_charge_fuel_concurrent() -> Result<()> {
+    typed_results_charge_fuel(ApiStyle::Concurrent).await
+}
+
+async fn typed_results_charge_fuel(style: ApiStyle) -> Result<()> {
+    let mut config = style.config();
+    config.consume_fuel(true).consume_lifting_fuel(true);
+    let engine = Engine::new(&config)?;
+    let component = string_component(&engine)?;
+    let mut store = Store::new(&engine, ());
+    let instance = style
+        .instantiate(&mut store, &Linker::new(&engine), &component)
+        .await?;
+    let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+    store.set_fuel(10_000)?;
+    style.call(&mut store, run, (0,)).await?;
+    let cost = 10_000 - store.get_fuel()? + 16;
+    store.set_fuel(2 * cost)?;
+    assert_eq!(
+        style.call(&mut store, run, (16,)).await?.0,
+        "abcdefghijklmnop"
+    );
+    assert_eq!(store.get_fuel()?, cost);
+    style.call(&mut store, run, (16,)).await?;
+    assert_eq!(store.get_fuel()?, 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn lifting_exhausts_the_active_batch_before_the_next_guest_call() -> Result<()> {
-    for style in [
-        ApiStyle::Async,
-        ApiStyle::AsyncNotConcurrent,
-        ApiStyle::Concurrent,
-    ] {
-        let mut config = style.config();
-        config.consume_fuel(true).consume_lifting_fuel(true);
-        let engine = Engine::new(&config)?;
-        let component = string_component(&engine)?;
-        let mut store = Store::new(&engine, ());
-        let instance = style
-            .instantiate(&mut store, &Linker::new(&engine), &component)
-            .await?;
-        let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
-        store.set_fuel(10_000)?;
-        style.call(&mut store, run, (0,)).await?;
-        let instructions = 10_000 - store.get_fuel()?;
-        // Leave enough active fuel for another empty call, but not the string lift.
-        assert!(instructions < 8);
-        store.fuel_async_yield_interval(Some(instructions + 8))?;
+async fn lifting_advances_next_yield_async() -> Result<()> {
+    lifting_advances_next_yield(ApiStyle::Async).await
+}
 
-        for (length, expected_yields) in [(0, 0), (16, 1)] {
-            store.set_fuel(10_000)?;
-            let (result, pending) =
-                CountPending::new(pin!(style.call(&mut store, run, (length,)))).await;
-            assert_eq!(result?.0.len(), length as usize);
-            assert_eq!(pending, 0, "lifting should complete without yielding");
-            assert_eq!(store.get_fuel()?, 10_000 - instructions - u64::from(length));
-            let (result, pending) =
-                CountPending::new(pin!(style.call(&mut store, run, (0,)))).await;
-            assert_eq!(result?.0, "");
-            assert_eq!(
-                pending, expected_yields,
-                "only the string lift should advance the next yield"
-            );
-            assert_eq!(
-                store.get_fuel()?,
-                10_000 - 2 * instructions - u64::from(length)
-            );
-        }
+#[tokio::test]
+async fn lifting_advances_next_yield_async_not_concurrent() -> Result<()> {
+    lifting_advances_next_yield(ApiStyle::AsyncNotConcurrent).await
+}
+
+#[tokio::test]
+async fn lifting_advances_next_yield_concurrent() -> Result<()> {
+    lifting_advances_next_yield(ApiStyle::Concurrent).await
+}
+
+async fn lifting_advances_next_yield(style: ApiStyle) -> Result<()> {
+    let mut config = style.config();
+    config.consume_fuel(true).consume_lifting_fuel(true);
+    let engine = Engine::new(&config)?;
+    let component = string_component(&engine)?;
+    let mut store = Store::new(&engine, ());
+    let instance = style
+        .instantiate(&mut store, &Linker::new(&engine), &component)
+        .await?;
+    let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+    store.set_fuel(10_000)?;
+    style.call(&mut store, run, (0,)).await?;
+    let instructions = 10_000 - store.get_fuel()?;
+    // Leave enough active fuel for another empty call, but not the string lift.
+    assert!(instructions < 8);
+    store.fuel_async_yield_interval(Some(instructions + 8))?;
+
+    for (length, expected_yields) in [(0, 0), (16, 1)] {
+        store.set_fuel(10_000)?;
+        let (result, pending) =
+            CountPending::new(pin!(style.call(&mut store, run, (length,)))).await;
+        assert_eq!(result?.0.len(), length as usize);
+        assert_eq!(pending, 0, "lifting should complete without yielding");
+        assert_eq!(store.get_fuel()?, 10_000 - instructions - u64::from(length));
+        let (result, pending) = CountPending::new(pin!(style.call(&mut store, run, (0,)))).await;
+        assert_eq!(result?.0, "");
+        assert_eq!(
+            pending, expected_yields,
+            "only the string lift should advance the next yield"
+        );
+        assert_eq!(
+            store.get_fuel()?,
+            10_000 - 2 * instructions - u64::from(length)
+        );
     }
     Ok(())
 }
@@ -460,76 +479,83 @@ async fn stream_writer(
 }
 
 #[tokio::test]
-async fn stream_lifting_exhaustion_retains_accepted_items_and_charges() -> Result<()> {
-    for style in [ApiStyle::Async, ApiStyle::Concurrent] {
-        let mut config = style.config();
-        config.consume_fuel(true).consume_lifting_fuel(true);
-        let engine = Engine::new(&config)?;
-        let component = Component::new(
-            &engine,
-            r#"(component
-                (core module $memory
-                    (memory (export "memory") 1)
-                    ;; String elements (pointer, length): (16, 8) and (24, 8).
-                    (data (i32.const 0) "\10\00\00\00\08\00\00\00")
-                    (data (i32.const 8) "\18\00\00\00\08\00\00\00")
-                    (data (i32.const 16) "abcdefghijklmnop"))
-                (core instance $memory (instantiate $memory))
-                (type $s (stream string))
-                (core func $new (canon stream.new $s))
-                (core func $write (canon stream.write $s async
-                    (memory (core memory $memory "memory"))))
-                (core module $guest
-                    (import "" "new" (func $new (result i64)))
-                    (import "" "write" (func $write (param i32 i32 i32) (result i32)))
-                    (global $writer (mut i32) (i32.const 0))
-                    (func (export "start") (result i32)
-                        (local $pair i64)
-                        (local.set $pair (call $new))
-                        (global.set $writer
-                            (i32.wrap_i64 (i64.shr_u (local.get $pair) (i64.const 32))))
-                        (i32.wrap_i64 (local.get $pair)))
-                    (func (export "write") (result i32)
-                        (call $write (global.get $writer) (i32.const 0) (i32.const 2))))
-                (core instance $guest (instantiate $guest
-                    (with "" (instance
-                        (export "new" (func $new))
-                        (export "write" (func $write))))))
-                (func (export "start") (result $s)
-                    (canon lift (core func $guest "start")))
-                (func (export "write") (result u32)
-                    (canon lift (core func $guest "write"))))"#,
-        )?;
-        // Streams charge the host item representation as well as its string bytes.
-        let item_cost = size_of::<String>() as u64 + 8;
-        let (mut store, write) = stream_writer(style, &component).await?;
-        store.set_fuel(10_000)?;
-        assert_eq!(style.call(&mut store, write, ()).await?.0, 2 << 4);
-        let state = store.data();
-        assert_eq!(state.values, ["abcdefgh", "ijklmnop"]);
-        let before = state.balances[0];
-        assert_eq!(
-            state.balances,
-            [before, before - item_cost, before - 2 * item_cost]
-        );
-        let before_host = 10_000 - before;
+async fn stream_lifting_exhaustion_async() -> Result<()> {
+    stream_lifting_exhaustion(ApiStyle::Async).await
+}
 
-        for (available, values, balances) in [
-            (item_cost - 1, &[][..], &[item_cost - 1, 0][..]),
-            (
-                2 * item_cost - 1,
-                &["abcdefgh"][..],
-                &[2 * item_cost - 1, item_cost - 1, 0][..],
-            ),
-        ] {
-            let (mut store, write) = stream_writer(style, &component).await?;
-            store.set_fuel(before_host + available)?;
-            let error = style.call(&mut store, write, ()).await.unwrap_err();
-            assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
-            assert_eq!(store.get_fuel()?, 0);
-            assert_eq!(store.data().values, values);
-            assert_eq!(store.data().balances, balances);
-        }
+#[tokio::test]
+async fn stream_lifting_exhaustion_concurrent() -> Result<()> {
+    stream_lifting_exhaustion(ApiStyle::Concurrent).await
+}
+
+async fn stream_lifting_exhaustion(style: ApiStyle) -> Result<()> {
+    let mut config = style.config();
+    config.consume_fuel(true).consume_lifting_fuel(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(
+        &engine,
+        r#"(component
+            (core module $memory
+                (memory (export "memory") 1)
+                ;; String elements (pointer, length): (16, 8) and (24, 8).
+                (data (i32.const 0) "\10\00\00\00\08\00\00\00")
+                (data (i32.const 8) "\18\00\00\00\08\00\00\00")
+                (data (i32.const 16) "abcdefghijklmnop"))
+            (core instance $memory (instantiate $memory))
+            (type $s (stream string))
+            (core func $new (canon stream.new $s))
+            (core func $write (canon stream.write $s async
+                (memory (core memory $memory "memory"))))
+            (core module $guest
+                (import "" "new" (func $new (result i64)))
+                (import "" "write" (func $write (param i32 i32 i32) (result i32)))
+                (global $writer (mut i32) (i32.const 0))
+                (func (export "start") (result i32)
+                    (local $pair i64)
+                    (local.set $pair (call $new))
+                    (global.set $writer
+                        (i32.wrap_i64 (i64.shr_u (local.get $pair) (i64.const 32))))
+                    (i32.wrap_i64 (local.get $pair)))
+                (func (export "write") (result i32)
+                    (call $write (global.get $writer) (i32.const 0) (i32.const 2))))
+            (core instance $guest (instantiate $guest
+                (with "" (instance
+                    (export "new" (func $new))
+                    (export "write" (func $write))))))
+            (func (export "start") (result $s)
+                (canon lift (core func $guest "start")))
+            (func (export "write") (result u32)
+                (canon lift (core func $guest "write"))))"#,
+    )?;
+    // Streams charge the host item representation as well as its string bytes.
+    let item_cost = size_of::<String>() as u64 + 8;
+    let (mut store, write) = stream_writer(style, &component).await?;
+    store.set_fuel(10_000)?;
+    assert_eq!(style.call(&mut store, write, ()).await?.0, 2 << 4);
+    let state = store.data();
+    assert_eq!(state.values, ["abcdefgh", "ijklmnop"]);
+    let before = state.balances[0];
+    assert_eq!(
+        state.balances,
+        [before, before - item_cost, before - 2 * item_cost]
+    );
+    let before_host = 10_000 - before;
+
+    for (available, values, balances) in [
+        (item_cost - 1, &[][..], &[item_cost - 1, 0][..]),
+        (
+            2 * item_cost - 1,
+            &["abcdefgh"][..],
+            &[2 * item_cost - 1, item_cost - 1, 0][..],
+        ),
+    ] {
+        let (mut store, write) = stream_writer(style, &component).await?;
+        store.set_fuel(before_host + available)?;
+        let error = style.call(&mut store, write, ()).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+        assert_eq!(store.get_fuel()?, 0);
+        assert_eq!(store.data().values, values);
+        assert_eq!(store.data().balances, balances);
     }
     Ok(())
 }
