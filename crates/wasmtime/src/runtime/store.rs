@@ -1010,8 +1010,6 @@ impl<T> Store<T> {
     /// units, as any execution cost associated with them involves other
     /// instructions which do consume fuel.
     ///
-    /// Fuel consumed by component lifting is not refunded if conversion fails.
-    ///
     /// Note that when fuel is entirely consumed it will cause wasm to trap.
     ///
     /// # Errors
