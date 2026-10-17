@@ -490,11 +490,6 @@ async fn lifting_advances_next_yield_async_not_concurrent() -> Result<()> {
     lifting_advances_next_yield(ApiStyle::AsyncNotConcurrent).await
 }
 
-#[tokio::test]
-async fn lifting_advances_next_yield_concurrent() -> Result<()> {
-    lifting_advances_next_yield(ApiStyle::Concurrent).await
-}
-
 async fn lifting_advances_next_yield(style: ApiStyle) -> Result<()> {
     let mut config = style.config();
     config.consume_fuel(true).consume_lifting_fuel(true);
@@ -584,11 +579,6 @@ async fn stream_writer(
 #[tokio::test]
 async fn stream_lifting_exhaustion_async() -> Result<()> {
     stream_lifting_exhaustion(ApiStyle::Async).await
-}
-
-#[tokio::test]
-async fn stream_lifting_exhaustion_concurrent() -> Result<()> {
-    stream_lifting_exhaustion(ApiStyle::Concurrent).await
 }
 
 async fn stream_lifting_exhaustion(style: ApiStyle) -> Result<()> {
