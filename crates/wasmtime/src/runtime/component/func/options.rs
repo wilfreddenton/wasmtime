@@ -551,7 +551,8 @@ impl<'a> LiftContext<'a> {
 
     /// Consumes `len * max(size, 1)` units of fuel, with checked multiplication.
     ///
-    /// Zero-sized Rust elements can still require validation or table storage.
+    /// The per-element minimum accounts for work such as validating a variant
+    /// tag in guest memory, even when the Rust element occupies no bytes.
     pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
         match len.checked_mul(size.max(1)) {
             Some(bytes) => self.consume_fuel(bytes),
