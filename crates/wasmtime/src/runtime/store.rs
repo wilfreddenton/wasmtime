@@ -1549,21 +1549,19 @@ impl StoreFuel<'_> {
             return Err(Trap::OutOfFuel.into());
         }
 
-        if *self.injected >= 0 {
-            *self.injected = 0;
-            *self.reserve = remaining - amount;
-            return Ok(());
-        }
-
-        // Spend active fuel first to advance the next guest yield. Refilling
-        // the active batch here would restart the yield interval.
-        let active = self.injected.unsigned_abs();
-        if amount <= active {
-            *self.injected += amount as i64;
+        let active = if *self.injected < 0 {
+            self.injected.unsigned_abs()
         } else {
-            *self.injected = 0;
-            *self.reserve -= amount - active;
-        }
+            0
+        };
+
+        // Charge the active batch first so lifting counts toward the next guest
+        // yield. Refilling it here would restart the yield interval.
+        let active_remaining = active.saturating_sub(amount);
+        let total_remaining = remaining - amount;
+
+        *self.injected = -(active_remaining as i64);
+        *self.reserve = total_remaining - active_remaining;
         Ok(())
     }
 }
