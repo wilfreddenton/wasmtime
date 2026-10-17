@@ -2678,34 +2678,52 @@ mod tests {
     #[test]
     #[cfg(feature = "component-model")]
     fn component_fuel_preserves_balance_and_yield_boundary() -> Result<()> {
-        for interval in [None, NonZeroU64::new(10)] {
-            for budget in [0, 1, 10, 25, i64::MAX as u64, u64::MAX] {
-                for amount in [0, 1, 10, 11, 25, i64::MAX as u64, u64::MAX] {
-                    let mut tank = FuelTank::new();
-                    tank.yield_interval = interval;
-                    tank.set_fuel(budget);
-                    let active = tank.consumed_fuel.unsigned_abs();
-                    let result = StoreFuel {
-                        injected: &mut tank.consumed_fuel,
-                        reserve: &mut tank.reserve_fuel,
-                    }
-                    .consume(amount);
-                    if amount > budget {
-                        assert_eq!(
-                            result.unwrap_err().downcast_ref::<Trap>(),
-                            Some(&Trap::OutOfFuel)
-                        );
-                        assert_eq!(tank.get_fuel(), 0);
-                    } else {
-                        result?;
-                        assert_eq!(tank.get_fuel(), budget - amount);
-                        assert_eq!(
-                            tank.consumed_fuel.unsigned_abs(),
-                            active.saturating_sub(amount)
-                        );
-                    }
-                }
+        let max = i64::MAX as u64;
+        for (injected, reserve, amount, expected, exhausted) in [
+            (0, 0, 0, (0, 0), false),
+            (0, 0, 1, (0, 0), true),
+            (-1, 0, 0, (-1, 0), false),
+            (-1, 0, 1, (0, 0), false),
+            (-1, 0, 2, (0, 0), true),
+            (-10, 15, 0, (-10, 15), false),
+            (-10, 15, 3, (-7, 15), false),
+            (-10, 15, 10, (0, 15), false),
+            (-10, 15, 11, (0, 14), false),
+            (-10, 15, 25, (0, 0), false),
+            (-10, 15, 26, (0, 0), true),
+            (0, 15, 3, (0, 12), false),
+            (-i64::MAX, 0, 1, (-i64::MAX + 1, 0), false),
+            (-i64::MAX, 0, max, (0, 0), false),
+            (-i64::MAX, 0, max + 1, (0, 0), true),
+            (-i64::MAX, 1, max + 1, (0, 0), false),
+            (-i64::MAX, u64::MAX - max, max, (0, u64::MAX - max), false),
+            (-i64::MAX, u64::MAX - max, max + 1, (0, max), false),
+            (-i64::MAX, u64::MAX - max, u64::MAX, (0, 0), false),
+            (-10, u64::MAX - 10, u64::MAX, (0, 0), false),
+        ] {
+            let mut tank = FuelTank {
+                consumed_fuel: injected,
+                reserve_fuel: reserve,
+                yield_interval: None,
+            };
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
             }
+            .consume(amount);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+            } else {
+                result?;
+            }
+            assert_eq!(
+                (tank.consumed_fuel, tank.reserve_fuel),
+                expected,
+                "initial counter={injected}, reserve={reserve}, charge={amount}"
+            );
         }
         Ok(())
     }
@@ -2713,7 +2731,12 @@ mod tests {
     #[test]
     #[cfg(feature = "component-model")]
     fn component_fuel_accounts_for_instruction_overrun() -> Result<()> {
-        for amount in [0, 3, 38, 39] {
+        for (amount, expected_reserve, exhausted) in [
+            (0, 38, false),
+            (3, 35, false),
+            (38, 0, false),
+            (39, 0, true),
+        ] {
             let mut tank = FuelTank::new();
             tank.consumed_fuel = 4;
             tank.reserve_fuel = 42;
@@ -2722,9 +2745,16 @@ mod tests {
                 reserve: &mut tank.reserve_fuel,
             }
             .consume(amount);
-            assert_eq!(tank.get_fuel(), 38_u64.saturating_sub(amount));
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+            } else {
+                result?;
+            }
             assert_eq!(tank.consumed_fuel, 0);
-            assert_eq!(result.is_ok(), amount <= 38);
+            assert_eq!(tank.reserve_fuel, expected_reserve);
         }
         Ok(())
     }
