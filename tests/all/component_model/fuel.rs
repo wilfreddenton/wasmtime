@@ -45,11 +45,12 @@ fn lifting_fuel_requires_instruction_fuel() -> Result<()> {
         if let Some(enabled) = instruction_fuel {
             config.consume_fuel(enabled);
         }
-        let error = Engine::new(&config).err().unwrap();
+        let error = Engine::new(&config).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("consume_lifting_fuel requires consume_fuel")
+                .contains("consume_lifting_fuel requires consume_fuel"),
+            "{error}"
         );
     }
     config.consume_fuel(true);
@@ -105,8 +106,12 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
     // A canonical variant tag still needs lifting despite having no native storage.
     assert_eq!(size_of::<ZeroSizedVariant>(), 0);
     assert_eq!(ZeroSizedVariant::SIZE32, 1);
-    for (enabled, lifting) in [(false, false), (true, false), (true, true)] {
-        let engine = Engine::new(config().consume_fuel(enabled).consume_lifting_fuel(lifting))?;
+    for (instruction_fuel, lifting_fuel) in [(false, false), (true, false), (true, true)] {
+        let engine = Engine::new(
+            config()
+                .consume_fuel(instruction_fuel)
+                .consume_lifting_fuel(lifting_fuel),
+        )?;
         let component = Component::new(
             &engine,
             r#"(component
@@ -126,30 +131,30 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
         let mut store = Store::new(&engine, ());
         let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
         let run = instance.get_typed_func::<(u32,), (Vec<ZeroSizedVariant>,)>(&mut store, "run")?;
-        if enabled {
+        if instruction_fuel {
             store.set_fuel(10_000)?;
         }
         store.set_hostcall_fuel(0);
         assert!(run.call(&mut store, (0,))?.0.is_empty());
-        let instructions = if enabled {
+        let instructions = if instruction_fuel {
             10_000 - store.get_fuel()?
         } else {
             0
         };
         for length in [1, 3] {
-            if enabled {
+            if instruction_fuel {
                 store.set_fuel(10_000)?;
             }
             store.set_hostcall_fuel(length as usize);
             let (values,) = run.call(&mut store, (length,))?;
             assert_eq!(values, vec![ZeroSizedVariant::Only; length as usize]);
-            if enabled {
-                let lift_cost = if lifting { u64::from(length) } else { 0 };
+            if instruction_fuel {
+                let lift_cost = if lifting_fuel { u64::from(length) } else { 0 };
                 assert_eq!(store.get_fuel()?, 10_000 - instructions - lift_cost);
             }
         }
 
-        if enabled {
+        if instruction_fuel {
             store.set_fuel(10_000)?;
         }
         store.set_hostcall_fuel(2);
@@ -157,10 +162,11 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
         assert!(
             error
                 .to_string()
-                .contains("fuel allocated for hostcalls has been exhausted")
+                .contains("fuel allocated for hostcalls has been exhausted"),
+            "{error}"
         );
         assert_eq!(store.hostcall_fuel(), 2);
-        if enabled {
+        if instruction_fuel {
             assert_eq!(store.get_fuel()?, 10_000 - instructions);
         }
     }
@@ -169,12 +175,12 @@ fn zero_sized_typed_list_elements_charge_by_count() -> Result<()> {
 
 #[test]
 fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
-    for (enabled, lifting) in [(false, false), (true, false), (true, true)] {
+    for (instruction_fuel, lifting_fuel) in [(false, false), (true, false), (true, true)] {
         let engine = Engine::new(
             config()
                 .wasm_component_model_map(true)
-                .consume_fuel(enabled)
-                .consume_lifting_fuel(lifting),
+                .consume_fuel(instruction_fuel)
+                .consume_lifting_fuel(lifting_fuel),
         )?;
         let component = Component::new(
             &engine,
@@ -196,19 +202,19 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
         let mut store = Store::new(&engine, ());
         let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
         let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
-        if enabled {
+        if instruction_fuel {
             store.set_fuel(10_000)?;
         }
         store.set_hostcall_fuel(0);
         assert!(run.call(&mut store, (0,))?.0.is_empty());
-        let instructions = if enabled {
+        let instructions = if instruction_fuel {
             10_000 - store.get_fuel()?
         } else {
             0
         };
         let cost = 2 * size_of::<(u32, u32)>();
         store.set_hostcall_fuel(cost);
-        if enabled {
+        if instruction_fuel {
             store.set_fuel(10_000)?;
         }
         assert_eq!(
@@ -221,8 +227,8 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
             HashMap::from([(1, 11), (2, 22)])
         );
         assert_eq!(store.hostcall_fuel(), cost);
-        if enabled {
-            let lift_cost = if lifting { cost as u64 } else { 0 };
+        if instruction_fuel {
+            let lift_cost = if lifting_fuel { cost as u64 } else { 0 };
             assert_eq!(store.get_fuel()?, 10_000 - 2 * (instructions + lift_cost));
             store.set_fuel(10_000)?;
         }
@@ -232,14 +238,15 @@ fn typed_map_results_check_both_fuel_budgets() -> Result<()> {
         assert!(
             error
                 .to_string()
-                .contains("fuel allocated for hostcalls has been exhausted")
+                .contains("fuel allocated for hostcalls has been exhausted"),
+            "{error}"
         );
         assert_eq!(store.hostcall_fuel(), cost - 1);
-        if enabled {
+        if instruction_fuel {
             assert_eq!(store.get_fuel()?, 10_000 - instructions);
         }
 
-        if lifting {
+        if lifting_fuel {
             let mut store = Store::new(&engine, ());
             let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
             let run = instance.get_typed_func::<(u32,), (HashMap<u32, u32>,)>(&mut store, "run")?;
@@ -531,7 +538,7 @@ async fn stream_lifting_exhaustion(style: ApiStyle) -> Result<()> {
     let item_cost = size_of::<String>() as u64 + 8;
     let (mut store, write) = stream_writer(style, &component).await?;
     store.set_fuel(10_000)?;
-    assert_eq!(style.call(&mut store, write, ()).await?.0, 2 << 4);
+    assert_eq!(style.call(&mut store, write, ()).await?.0, 2 << 4); // COMPLETED(2)
     let state = store.data();
     assert_eq!(state.values, ["abcdefgh", "ijklmnop"]);
     let before = state.balances[0];
