@@ -1809,7 +1809,7 @@ impl<T: Lift> WasmList<T> {
     ///
     /// # Panics
     ///
-    /// This function will panic if the list did not originally come from the
+    /// This function will panic if the string did not originally come from the
     /// `store` specified.
     //
     // TODO: given that interface values are intended to be consumed in one go
