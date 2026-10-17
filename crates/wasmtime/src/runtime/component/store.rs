@@ -67,6 +67,7 @@ pub struct ComponentStoreData {
     /// Caps the size of the allocations made on the host to this amount
     /// effectively.
     hostcall_fuel: usize,
+    hostcall_fuel_enabled: bool,
 }
 
 /// State tracking for tasks within components.
@@ -116,6 +117,7 @@ impl ComponentStoreData {
                 ComponentTaskState::NotConcurrent(Default::default())
             },
             hostcall_fuel: DEFAULT_HOSTCALL_FUEL,
+            hostcall_fuel_enabled: true,
         }
     }
 
@@ -491,6 +493,14 @@ impl StoreOpaque {
         state.scopes.pop();
     }
 
+    pub(crate) fn hostcall_fuel_enabled(&self) -> bool {
+        self.component_data().hostcall_fuel_enabled
+    }
+
+    pub(crate) fn set_hostcall_fuel_enabled(&mut self, enabled: bool) {
+        self.component_data_mut().hostcall_fuel_enabled = enabled;
+    }
+
     pub(crate) fn hostcall_fuel(&self) -> usize {
         self.component_data().hostcall_fuel
     }
@@ -532,6 +542,29 @@ impl StoreOpaque {
 }
 
 impl<T> Store<T> {
+    /// Returns whether the native component allocation allowance is enabled.
+    ///
+    /// This defaults to `true`. See [`Store::set_hostcall_fuel_enabled`].
+    pub fn hostcall_fuel_enabled(&self) -> bool {
+        self.as_context().0.hostcall_fuel_enabled()
+    }
+
+    /// Enables or disables the native component allocation allowance.
+    ///
+    /// This defaults to `true` and is independent of
+    /// [`Config::consume_lifting_fuel`](crate::Config::consume_lifting_fuel).
+    /// Disabling it skips native allocation accounting for subsequent lifting
+    /// contexts, while preserving memory bounds and type validation. The value
+    /// configured with [`Store::set_hostcall_fuel`] is retained for re-enabling.
+    ///
+    /// Without this allowance, embedders must bound guest-induced host work and
+    /// allocations through other means, such as appropriately priced lifting
+    /// fuel and a finite Store fuel budget. Lifting prices are accounting units,
+    /// not an exact native memory limit.
+    pub fn set_hostcall_fuel_enabled(&mut self, enabled: bool) {
+        self.as_context_mut().set_hostcall_fuel_enabled(enabled);
+    }
+
     /// Returns the amount of "hostcall fuel" used for guest-to-host component
     /// calls.
     ///
@@ -569,9 +602,10 @@ impl<T> Store<T> {
     ///
     /// The default value for this is 128 MiB.
     ///
-    /// With [`crate::Config::consume_lifting_fuel`] configured, each unit consumed
-    /// also consumes the configured amount of Store fuel. This allowance is
-    /// checked first and is not scaled by the Store fuel cost.
+    /// With [`crate::Config::consume_lifting_fuel`] configured, separate portable
+    /// lifting units consume Store fuel. When enabled, this native allowance is
+    /// checked first and is not scaled by the Store fuel prices. Setting its
+    /// amount does not change [`Store::hostcall_fuel_enabled`].
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }
@@ -629,6 +663,16 @@ impl<T> Store<T> {
 }
 
 impl<T> StoreContextMut<'_, T> {
+    /// See [`Store::hostcall_fuel_enabled`].
+    pub fn hostcall_fuel_enabled(&self) -> bool {
+        self.0.hostcall_fuel_enabled()
+    }
+
+    /// See [`Store::set_hostcall_fuel_enabled`].
+    pub fn set_hostcall_fuel_enabled(&mut self, enabled: bool) {
+        self.0.set_hostcall_fuel_enabled(enabled);
+    }
+
     /// See [`Store::hostcall_fuel`].
     pub fn hostcall_fuel(&self) -> usize {
         self.0.hostcall_fuel()

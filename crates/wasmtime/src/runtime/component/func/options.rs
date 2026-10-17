@@ -10,7 +10,7 @@ use crate::runtime::vm::component::{
 };
 use crate::runtime::vm::{UncaughtException, VMFuncRef};
 use crate::store::{StoreFuel, StoreId, StoreOpaque};
-use crate::{StoreContextMut, Trap};
+use crate::{LiftingPrices, StoreContextMut};
 use alloc::sync::Arc;
 use core::fmt;
 use core::pin::Pin;
@@ -363,7 +363,7 @@ pub struct LiftContext<'a> {
     ///
     /// This is decremented for strings/lists, for example, to cap the size of
     /// data the host allocates on behalf of the guest.
-    hostcall_fuel: usize,
+    hostcall_fuel: Option<usize>,
     store_fuel: Option<StoreFuel<'a>>,
 }
 
@@ -377,7 +377,7 @@ impl<'a> LiftContext<'a> {
         instance_handle: Instance,
     ) -> Result<LiftContext<'a>> {
         let store_id = store.id();
-        let hostcall_fuel = store.hostcall_fuel();
+        let hostcall_fuel = store.hostcall_fuel_enabled().then(|| store.hostcall_fuel());
         let current_scope = store.current_scope()?;
         // From `&mut StoreOpaque` provided the goal here is to project out
         // three different disjoint fields owned by the store: memory,
@@ -531,32 +531,32 @@ impl<'a> LiftContext<'a> {
         self.resource_tables().validate_scope_exit()
     }
 
-    /// Consumes `amt` units of fuel, typically a number of bytes, from this
-    /// context.
-    ///
-    /// Checks the per-lift allowance before charging Store fuel when lifting fuel
-    /// consumption is enabled. Returns an error if either budget is insufficient.
-    pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {
+    pub(crate) fn consume_fuel(
+        &mut self,
+        len: usize,
+        native_size: usize,
+        units_per_element: usize,
+        kind: LiftingKind,
+    ) -> Result<()> {
+        // Skip native arithmetic entirely when the allowance is disabled, so
+        // native layout cannot affect either acceptance or charged fuel.
         let new = self
             .hostcall_fuel
-            .checked_sub(amt)
-            .ok_or(HostcallFuelExhausted)?;
+            .map(|remaining| {
+                len.checked_mul(native_size)
+                    .and_then(|native| remaining.checked_sub(native))
+                    .ok_or(HostcallFuelExhausted)
+            })
+            .transpose()?;
         if let Some(fuel) = &mut self.store_fuel {
-            fuel.consume(u64::try_from(amt).map_err(|_| Trap::OutOfFuel)?)?;
+            fuel.consume_product(
+                len as u64,
+                units_per_element as u64,
+                kind.price(fuel.prices),
+            )?;
         }
         self.hostcall_fuel = new;
         Ok(())
-    }
-
-    /// Consumes `len * max(size, 1)` units of fuel, with checked multiplication.
-    ///
-    /// The per-element minimum accounts for work such as validating a variant
-    /// tag in guest memory, even when the Rust element occupies no bytes.
-    pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
-        match len.checked_mul(size.max(1)) {
-            Some(bytes) => self.consume_fuel(bytes),
-            None => bail!(HostcallFuelExhausted),
-        }
     }
 }
 
@@ -574,3 +574,21 @@ impl fmt::Display for HostcallFuelExhausted {
 }
 
 impl core::error::Error for HostcallFuelExhausted {}
+
+pub(crate) enum LiftingKind {
+    String,
+    TypedCollection,
+    DynamicValue,
+    Name,
+}
+
+impl LiftingKind {
+    fn price(self, prices: LiftingPrices) -> u64 {
+        match self {
+            Self::String => prices.string_byte,
+            Self::TypedCollection => prices.typed_collection_abi_byte,
+            Self::DynamicValue => prices.dynamic_value_slot,
+            Self::Name => prices.copied_name_byte,
+        }
+    }
+}

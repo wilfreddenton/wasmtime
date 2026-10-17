@@ -36,6 +36,44 @@ pub use wasmtime_cache::{Cache, CacheConfig};
 pub use wasmtime_environ::CacheStore;
 pub use wasmtime_environ::Inlining;
 
+/// Store fuel prices for component lifting, configured with
+/// [`Config::consume_lifting_fuel`].
+///
+/// Quantities use canonical ABI sizes, byte counts, and value counts, never
+/// native Rust layout. These are accounting units, not measured native memory
+/// usage. Typed and dynamic bindings can charge different quantities.
+///
+/// Prices apply independently and add across nested values. Every checkpoint
+/// computes `count * units_per_element * price` with checked `u64` arithmetic.
+/// A zero price makes that category free, including when its unpriced quantity
+/// would overflow. No default prices are supplied: embedders choose all four.
+///
+/// The units and charging behavior are part of this API's compatibility
+/// contract. Changes to them require a breaking release. Embedders requiring
+/// historical replay should pin the runtime, retain their price tables, and
+/// check exact charges and failure outcomes when upgrading.
+#[cfg(feature = "component-model")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiftingPrices {
+    /// Fuel per byte in a string's guest encoding. UTF-8 and Latin-1 use their
+    /// byte lengths; UTF-16 uses two bytes per code unit. Charged when the string
+    /// is lifted, including lazy `WasmStr` construction, before decoding.
+    pub string_byte: u64,
+    /// Fuel per canonical ABI byte of typed list elements or map entries.
+    /// Each element/entry uses at least one unit, even for a zero-sized type.
+    /// Includes lazy list construction and typed stream reads that lift lists.
+    /// Nested strings and collections incur their own additional charges.
+    pub typed_collection_abi_byte: u64,
+    /// Fuel per dynamic `Val` slot: each list/tuple/record element, each map key
+    /// and value, and each present boxed variant/option/result payload. Dynamic
+    /// stream staging also charges its slots. Scalar values alone have no slot
+    /// charge. Nested container slots are charged recursively.
+    pub dynamic_value_slot: u64,
+    /// Fuel per UTF-8 byte of a name copied into a dynamic value (record field,
+    /// variant case, enum case, or selected flag name).
+    pub copied_name_byte: u64,
+}
+
 pub(crate) const DEFAULT_WASM_BACKTRACE_MAX_FRAMES: NonZeroUsize = NonZeroUsize::new(20).unwrap();
 
 /// Represents the module instance allocation strategy to use.
@@ -165,7 +203,7 @@ pub struct Config {
     profiling_strategy: ProfilingStrategy,
     tunables: ConfigTunables,
     #[cfg(feature = "component-model")]
-    pub(crate) consume_lifting_fuel: Option<u64>,
+    pub(crate) consume_lifting_fuel: Option<LiftingPrices>,
 
     #[cfg(feature = "cache")]
     pub(crate) cache: Option<Cache>,
@@ -649,21 +687,26 @@ impl Config {
         self
     }
 
-    /// Configures the Store fuel cost per unit of component lifting fuel.
+    /// Configures Store fuel prices for component lifting.
     ///
-    /// `None` disables Store fuel charges for lifting. `Some(cost)` requires
-    /// [`Config::consume_fuel`] to be enabled and charges `cost` units of Store
-    /// fuel per unit of hostcall fuel. A cost of zero is allowed. The hostcall
-    /// allowance is checked first and is not scaled by this cost.
+    /// `None` (the default) disables lifting charges. `Some(prices)` requires
+    /// [`Config::consume_fuel`] and charges the shared Store fuel budget according
+    /// to [`LiftingPrices`]. Prices may be zero.
     ///
-    /// Charges depend on native Rust representations and may vary across
-    /// platforms or bindings. Host-side lowering work is not charged.
-    /// Insufficient Store fuel or cost overflow exhausts the balance and traps.
+    /// The native allocation allowance is independent. When enabled, it is
+    /// checked before each Store fuel deduction. See
+    /// [`Store::set_hostcall_fuel_enabled`](crate::Store::set_hostcall_fuel_enabled).
+    /// Insufficient Store fuel or charge overflow exhausts the balance and traps
+    /// with [`Trap::OutOfFuel`](crate::Trap::OutOfFuel). Earlier deductions are
+    /// retained if a later check or conversion fails.
     ///
-    /// By default this option is `None`.
+    /// Charges occur at allocation/copy checkpoints, before the associated work.
+    /// Memory range checks precede string/list charges; content validation such
+    /// as UTF-8 validation follows them. This does not meter arbitrary host work,
+    /// repeated decoding through `WasmStr::to_str`, or host-side lowering.
     #[cfg(feature = "component-model")]
-    pub fn consume_lifting_fuel(&mut self, cost_per_unit: Option<u64>) -> &mut Self {
-        self.consume_lifting_fuel = cost_per_unit;
+    pub fn consume_lifting_fuel(&mut self, prices: Option<LiftingPrices>) -> &mut Self {
+        self.consume_lifting_fuel = prices;
         self
     }
 
@@ -5173,7 +5216,7 @@ impl Engine {
 
     /// Returns the configured [`Config::consume_lifting_fuel`] value.
     #[cfg(feature = "component-model")]
-    pub fn get_consume_lifting_fuel(&self) -> Option<u64> {
+    pub fn get_consume_lifting_fuel(&self) -> Option<LiftingPrices> {
         self.config().consume_lifting_fuel
     }
 

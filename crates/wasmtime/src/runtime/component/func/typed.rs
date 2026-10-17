@@ -1,5 +1,5 @@
 use crate::component::Instance;
-use crate::component::func::{Func, LiftContext, LowerContext};
+use crate::component::func::{Func, LiftContext, LiftingKind, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::storage::{storage_as_slice, storage_as_slice_mut};
 use crate::hash_map::HashMap;
@@ -1531,7 +1531,9 @@ impl WasmStr {
             bail!("string pointer not aligned to {align}");
         }
         match byte_len.and_then(|len| ptr.checked_add(len)) {
-            Some(n) if n <= cx.memory().len() => cx.consume_fuel(n - ptr)?,
+            Some(n) if n <= cx.memory().len() => {
+                cx.consume_fuel(n - ptr, 1, 1, LiftingKind::String)?
+            }
             _ => bail!("string pointer/length out of bounds of memory"),
         }
         Ok(WasmStr {
@@ -1780,7 +1782,12 @@ impl<T: Lift> WasmList<T> {
             .checked_mul(T::SIZE32)
             .and_then(|len| ptr.checked_add(len))
         {
-            Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<T>())?,
+            Some(n) if n <= cx.memory().len() => cx.consume_fuel(
+                len,
+                size_of::<T>().max(1),
+                T::SIZE32.max(1),
+                LiftingKind::TypedCollection,
+            )?,
             _ => bail!("list pointer/length out of bounds of memory"),
         }
         if ptr % usize::try_from(T::ALIGN32)? != 0 {
@@ -2155,7 +2162,12 @@ where
         .checked_mul(usize::try_from(map.entry_abi.size32)?)
         .and_then(|total| ptr.checked_add(total))
     {
-        Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<(K, V)>())?,
+        Some(n) if n <= cx.memory().len() => cx.consume_fuel(
+            len,
+            size_of::<(K, V)>().max(1),
+            (map.entry_abi.size32 as usize).max(1),
+            LiftingKind::TypedCollection,
+        )?,
         _ => bail!("map pointer/length out of bounds of memory"),
     }
     if ptr % (map.entry_abi.align32 as usize) != 0 {

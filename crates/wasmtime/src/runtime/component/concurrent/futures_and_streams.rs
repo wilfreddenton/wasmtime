@@ -3,6 +3,7 @@ use super::{Event, GlobalErrorContextRefCount, Waitable, WaitableCommon};
 use crate::component::concurrent::{
     ConcurrentState, CurrentThread, QualifiedThreadId, WorkItem, tls,
 };
+use crate::component::func::LiftingKind;
 use crate::component::func::{self, LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::resources::{HostResourceIndex, HostResourceTables};
@@ -3497,7 +3498,12 @@ impl Instance {
                     let store_opaque = store.store_opaque_mut();
                     let lift = &mut LiftContext::new(store_opaque, write_options, write_instance)?;
                     let bytes = &lift.memory()[write_address..][..write_length_in_bytes];
-                    lift.consume_fuel_array(count, size_of::<Val>())?;
+                    lift.consume_fuel(
+                        count,
+                        size_of::<Val>().max(1),
+                        1,
+                        LiftingKind::DynamicValue,
+                    )?;
 
                     let values = (0..count)
                         .map(|index| {
