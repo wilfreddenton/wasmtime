@@ -1,7 +1,6 @@
 use crate::ValRaw;
 use crate::component::ResourceAny;
 use crate::component::concurrent::{self, ErrorContext, FutureAny, StreamAny};
-use crate::component::func::LiftingKind;
 use crate::component::func::{Lift, LiftContext, Lower, LowerContext, desc};
 use crate::prelude::*;
 use core::mem::MaybeUninit;
@@ -145,18 +144,13 @@ impl Val {
             }
             InterfaceType::Record(i) => {
                 let fields = &cx.types[i].fields;
-                cx.consume_fuel(
-                    fields.len(),
-                    size_of::<Val>().max(1),
-                    1,
-                    LiftingKind::DynamicValue,
-                )?;
+                cx.consume_fuel_array(fields.len(), size_of::<Val>())?;
                 Val::Record(
                     fields
                         .iter()
                         .map(|field| {
                             let val = Self::lift(cx, field.ty, src)?;
-                            cx.consume_fuel(field.name.len(), 1, 1, LiftingKind::Name)?;
+                            cx.consume_fuel(field.name.len())?;
                             Ok((field.name.to_string(), val))
                         })
                         .collect::<Result<_>>()?,
@@ -164,12 +158,7 @@ impl Val {
             }
             InterfaceType::Tuple(i) => {
                 let types = &cx.types[i].types;
-                cx.consume_fuel(
-                    types.len(),
-                    size_of::<Val>().max(1),
-                    1,
-                    LiftingKind::DynamicValue,
-                )?;
+                cx.consume_fuel_array(types.len(), size_of::<Val>())?;
                 Val::Tuple(
                     types
                         .iter()
@@ -187,7 +176,7 @@ impl Val {
                 )?;
 
                 let (k, _) = vty.cases.get_index(discriminant as usize).unwrap();
-                cx.consume_fuel(k.len(), 1, 1, LiftingKind::Name)?;
+                cx.consume_fuel(k.len())?;
                 Val::Variant(k.clone(), value)
             }
             InterfaceType::Enum(i) => {
@@ -200,7 +189,7 @@ impl Val {
                 )?;
 
                 let name = &ety.names[discriminant as usize];
-                cx.consume_fuel(name.len(), 1, 1, LiftingKind::Name)?;
+                cx.consume_fuel(name.len())?;
                 Val::Enum(name.clone())
             }
             InterfaceType::Option(i) => {
@@ -250,12 +239,7 @@ impl Val {
             }
             InterfaceType::FixedLengthList(i) => {
                 let number_elements = usize::try_from(cx.types[i].size)?;
-                cx.consume_fuel(
-                    number_elements,
-                    size_of::<Val>().max(1),
-                    1,
-                    LiftingKind::DynamicValue,
-                )?;
+                cx.consume_fuel_array(number_elements, size_of::<Val>())?;
                 Val::FixedLengthList(
                     (0..number_elements)
                         .map(|_| Self::lift(cx, cx.types[i].element, src))
@@ -296,16 +280,11 @@ impl Val {
             InterfaceType::Record(i) => {
                 let mut offset = 0;
                 let fields = cx.types[i].fields.iter();
-                cx.consume_fuel(
-                    fields.len(),
-                    size_of::<Val>().max(1),
-                    1,
-                    LiftingKind::DynamicValue,
-                )?;
+                cx.consume_fuel_array(fields.len(), size_of::<Val>())?;
                 Val::Record(
                     fields
                         .map(|field| -> Result<(String, Val)> {
-                            cx.consume_fuel(field.name.len(), 1, 1, LiftingKind::Name)?;
+                            cx.consume_fuel(field.name.len())?;
                             let abi = cx.types.canonical_abi(&field.ty);
                             let offset = abi.next_field32(&mut offset);
                             let offset = usize::try_from(offset).unwrap();
@@ -320,12 +299,7 @@ impl Val {
             }
             InterfaceType::Tuple(i) => {
                 let types = cx.types[i].types.iter().copied();
-                cx.consume_fuel(
-                    types.len(),
-                    size_of::<Val>().max(1),
-                    1,
-                    LiftingKind::DynamicValue,
-                )?;
+                cx.consume_fuel_array(types.len(), size_of::<Val>())?;
                 let mut offset = 0;
                 Val::Tuple(
                     types
@@ -345,7 +319,7 @@ impl Val {
                     load_variant(cx, &ty.info, ty.cases.values().copied(), bytes)?;
 
                 let (k, _) = ty.cases.get_index(discriminant as usize).unwrap();
-                cx.consume_fuel(k.len(), 1, 1, LiftingKind::Name)?;
+                cx.consume_fuel(k.len())?;
                 Val::Variant(k.clone(), value)
             }
             InterfaceType::Enum(i) => {
@@ -354,7 +328,7 @@ impl Val {
                     load_variant(cx, &ty.info, ty.names.iter().map(|_| None), bytes)?;
 
                 let name = &ty.names[discriminant as usize];
-                cx.consume_fuel(name.len(), 1, 1, LiftingKind::Name)?;
+                cx.consume_fuel(name.len())?;
                 Val::Enum(name.clone())
             }
             InterfaceType::Option(i) => {
@@ -414,12 +388,7 @@ impl Val {
 
                 match number_elements.checked_mul(element_size) {
                     Some(total_size) if total_size <= bytes.len() => {
-                        cx.consume_fuel(
-                            number_elements,
-                            size_of::<Val>().max(1),
-                            1,
-                            LiftingKind::DynamicValue,
-                        )?;
+                        cx.consume_fuel_array(number_elements, size_of::<Val>())?;
                         Val::FixedLengthList(
                             (0..number_elements)
                                 .map(|n| {
@@ -1069,15 +1038,14 @@ fn load_list(cx: &mut LiftContext<'_>, ty: TypeListIndex, ptr: usize, len: usize
         .checked_mul(element_size)
         .and_then(|len| ptr.checked_add(len))
     {
-        Some(n) if n <= cx.memory().len() => {
-            cx.consume_fuel(len, size_of::<Val>().max(1), 1, LiftingKind::DynamicValue)?
-        }
+        Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<Val>())?,
         _ => bail!("list pointer/length out of bounds of memory"),
     }
     if ptr % usize::try_from(element_alignment)? != 0 {
         bail!("list pointer is not aligned")
     }
 
+    cx.consume_structure(elem, len)?;
     Ok(Val::List(
         (0..len)
             .map(|index| {
@@ -1110,12 +1078,7 @@ fn load_map(cx: &mut LiftContext<'_>, ty: TypeMapIndex, ptr: usize, len: usize) 
         .checked_mul(tuple_size)
         .and_then(|len| ptr.checked_add(len))
     {
-        Some(n) if n <= cx.memory().len() => cx.consume_fuel(
-            len,
-            size_of::<(Val, Val)>().max(1),
-            2,
-            LiftingKind::DynamicValue,
-        )?,
+        Some(n) if n <= cx.memory().len() => cx.consume_fuel_array(len, size_of::<(Val, Val)>())?,
         _ => bail!("map pointer/length out of bounds of memory"),
     }
     if ptr % usize::try_from(tuple_alignment)? != 0 {
@@ -1123,6 +1086,8 @@ fn load_map(cx: &mut LiftContext<'_>, ty: TypeMapIndex, ptr: usize, len: usize) 
     }
 
     // Load each tuple (key, value) into a Vec
+    cx.consume_structure(key_ty, len)?;
+    cx.consume_structure(value_ty, len)?;
     let mut map = Vec::with_capacity(len);
     for index in 0..len {
         let tuple_ptr = ptr + (index * tuple_size);
@@ -1165,7 +1130,7 @@ fn load_variant(
         .ok_or_else(|| format_err!("discriminant {discriminant} out of range [0..{len})"))?;
     let value = match case_ty {
         Some(case_ty) => {
-            cx.consume_fuel(1, size_of::<Val>(), 1, LiftingKind::DynamicValue)?;
+            cx.consume_fuel(size_of::<Val>())?;
             let payload_offset = usize::try_from(info.payload_offset32).unwrap();
             let case_abi = cx.types.canonical_abi(&case_ty);
             let case_size = usize::try_from(case_abi.size32).unwrap();
@@ -1193,7 +1158,7 @@ fn lift_variant(
         .ok_or_else(|| format_err!("discriminant {discriminant} out of range [0..{len})"))?;
     let (value, value_flat) = match ty {
         Some(ty) => {
-            cx.consume_fuel(1, size_of::<Val>(), 1, LiftingKind::DynamicValue)?;
+            cx.consume_fuel(size_of::<Val>())?;
             (
                 Some(Box::new(Val::lift(cx, ty, src)?)),
                 cx.types.canonical_abi(&ty).flat_count(usize::MAX).unwrap(),
@@ -1269,7 +1234,7 @@ fn push_flags(
     while bits > 0 && usize::try_from(offset).unwrap() < ty.names.len() {
         if bits & 1 != 0 {
             let name = &ty.names[offset as usize];
-            cx.consume_fuel(name.len(), 1, 1, LiftingKind::Name)?;
+            cx.consume_fuel(name.len())?;
             flags.push(name.clone());
         }
         bits >>= 1;

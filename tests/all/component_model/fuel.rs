@@ -14,9 +14,8 @@ use wasmtime::{AsContextMut, Config, Engine, LiftingPrices, Result, Store, Store
 fn prices(unit: u64) -> LiftingPrices {
     LiftingPrices {
         string_byte: unit,
-        typed_collection_abi_byte: unit,
-        dynamic_value_slot: unit,
-        copied_name_byte: unit,
+        lift_value: unit,
+        metadata_byte: 0,
     }
 }
 
@@ -124,20 +123,23 @@ fn lifting_fuel_charges_when_enabled() -> Result<()> {
 }
 
 #[test]
-fn zero_sized_list_elements_charge_by_count_without_fuel() -> Result<()> {
-    zero_sized_typed_list_elements_charge_by_count(&config())
+fn zero_sized_list_elements_preserve_native_allowance_without_fuel() -> Result<()> {
+    zero_sized_typed_list_elements_preserve_native_allowance(&config())
 }
 
 #[test]
-fn zero_sized_list_elements_charge_by_count_with_lifting_fuel() -> Result<()> {
-    zero_sized_typed_list_elements_charge_by_count(
-        config()
-            .consume_fuel(true)
-            .consume_lifting_fuel(Some(prices(1))),
-    )
+fn zero_sized_list_elements_preserve_native_allowance_with_fuel() -> Result<()> {
+    for price in [None, Some(0), Some(1)] {
+        zero_sized_typed_list_elements_preserve_native_allowance(
+            config()
+                .consume_fuel(true)
+                .consume_lifting_fuel(price.map(prices)),
+        )?;
+    }
+    Ok(())
 }
 
-fn zero_sized_typed_list_elements_charge_by_count(config: &Config) -> Result<()> {
+fn zero_sized_typed_list_elements_preserve_native_allowance(config: &Config) -> Result<()> {
     // A canonical variant tag still needs lifting despite having no native storage.
     assert_eq!(size_of::<ZeroSizedVariant>(), 0);
     assert_eq!(ZeroSizedVariant::SIZE32, 1);
@@ -145,7 +147,7 @@ fn zero_sized_typed_list_elements_charge_by_count(config: &Config) -> Result<()>
     let instruction_fuel = engine.get_consume_fuel();
     let lifting_cost = engine
         .get_consume_lifting_fuel()
-        .map_or(0, |p| p.typed_collection_abi_byte);
+        .map_or(0, |p| p.lift_value);
     let component = Component::new(
         &engine,
         r#"(component
@@ -182,7 +184,6 @@ fn zero_sized_typed_list_elements_charge_by_count(config: &Config) -> Result<()>
         if instruction_fuel {
             store.set_fuel(10_000)?;
         }
-        store.set_hostcall_fuel(length as usize);
         let (values,) = run.call(&mut store, (length,))?;
         assert_eq!(values, vec![ZeroSizedVariant::Only; length as usize]);
         if instruction_fuel {
@@ -191,20 +192,17 @@ fn zero_sized_typed_list_elements_charge_by_count(config: &Config) -> Result<()>
         }
     }
 
-    if instruction_fuel {
-        store.set_fuel(10_000)?;
-    }
-    store.set_hostcall_fuel(2);
-    let error = run.call(&mut store, (3,)).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("fuel allocated for hostcalls has been exhausted"),
-        "{error}"
-    );
-    assert_eq!(store.hostcall_fuel(), 2);
-    if instruction_fuel {
-        assert_eq!(store.get_fuel()?, 10_000 - instructions);
+    assert!(store.hostcall_fuel_enabled());
+    assert_eq!(store.hostcall_fuel(), 0);
+    if lifting_cost > 0 {
+        store.set_fuel(instructions + 3 * lifting_cost)?;
+        assert_eq!(run.call(&mut store, (3,))?.0.len(), 3);
+        assert_eq!(store.get_fuel()?, 0);
+
+        store.set_fuel(instructions + 3 * lifting_cost - 1)?;
+        let error = run.call(&mut store, (3,)).unwrap_err();
+        assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+        assert_eq!(store.get_fuel()?, 0);
     }
     Ok(())
 }
@@ -270,7 +268,7 @@ fn map_charges_each_call(config: &Config) -> Result<()> {
     let lifting_cost = store
         .engine()
         .get_consume_lifting_fuel()
-        .map_or(0, |p| p.typed_collection_abi_byte);
+        .map_or(0, |p| p.lift_value);
     let cost = 2 * size_of::<(u32, u32)>();
 
     store.set_hostcall_fuel(0);
@@ -284,7 +282,7 @@ fn map_charges_each_call(config: &Config) -> Result<()> {
     assert_eq!(second, first);
     assert_eq!(store.hostcall_fuel(), cost);
     if instruction_fuel {
-        let lift_cost = 16 * lifting_cost;
+        let lift_cost = 4 * lifting_cost;
         assert_eq!(store.get_fuel()?, 10_000 - 3 * instructions - 2 * lift_cost);
     }
     Ok(())
@@ -334,7 +332,7 @@ fn map_rejects_insufficient_store_fuel() -> Result<()> {
     let (mut store, run, instructions) = map_fixture(&config)?;
     let cost = 2 * size_of::<(u32, u32)>();
     store.set_hostcall_fuel(cost);
-    store.set_fuel(instructions + 16 - 1)?;
+    store.set_fuel(instructions + 4 - 1)?;
 
     let error = run.call(&mut store, (2,)).unwrap_err();
 
@@ -387,7 +385,7 @@ fn lazy_list_creation_charges_storage() -> Result<()> {
 
     assert_eq!(empty.len(), 0);
     assert_eq!(list.len(), 2);
-    assert_eq!(store.get_fuel()?, 10_000 - instructions - 2 * 8);
+    assert_eq!(store.get_fuel()?, 10_000 - instructions - 2);
     Ok(())
 }
 
@@ -402,7 +400,7 @@ fn lazy_list_get_charges_fuel() -> Result<()> {
 
     assert_eq!(value, "abc");
     assert!(missing.is_none());
-    assert_eq!(store.get_fuel()?, 7);
+    assert_eq!(store.get_fuel()?, 6);
     Ok(())
 }
 
@@ -430,7 +428,7 @@ fn lazy_list_iter_charges_fuel() -> Result<()> {
     let values = list.iter(&mut store)?.collect::<Result<Vec<_>>>()?;
 
     assert_eq!(values, ["abc", "def"]);
-    assert_eq!(store.get_fuel()?, 4);
+    assert_eq!(store.get_fuel()?, 2);
     Ok(())
 }
 
@@ -438,7 +436,7 @@ fn lazy_list_iter_charges_fuel() -> Result<()> {
 fn lazy_list_iter_exhausts_fuel() -> Result<()> {
     let (mut store, run) = lazy_list_fixture()?;
     let (list,) = run.call(&mut store, (2,))?;
-    store.set_fuel(5)?;
+    store.set_fuel(6)?;
 
     let (first, error, finished) = {
         let mut values = list.iter(&mut store)?;
@@ -554,7 +552,7 @@ async fn lifting_advances_next_yield(style: ApiStyle) -> Result<()> {
     style.call(&mut store, run, (0,)).await?;
     let instructions = 10_000 - store.get_fuel()?;
     // Leave enough active fuel for another empty call, but not the string lift.
-    assert!(instructions < 8);
+    assert!(instructions < 10);
     store.fuel_async_yield_interval(Some(instructions + 8))?;
 
     for (length, expected_yields) in [(0, 0), (16, 1)] {
@@ -672,8 +670,8 @@ async fn stream_lifting_exhaustion(style: ApiStyle) -> Result<()> {
             (func (export "write") (result u32)
                 (canon lift (core func $guest "write"))))"#,
     )?;
-    // Each item charges its canonical string header and its encoded bytes.
-    let item_cost = 8 + 8;
+    // Each item charges one value node and its encoded bytes.
+    let item_cost = 1 + 8;
     let (mut store, write) = stream_writer(style, &component).await?;
     store.set_fuel(10_000)?;
     assert_eq!(style.call(&mut store, write, ()).await?.0, 2 << 4); // COMPLETED(2)
@@ -840,9 +838,8 @@ fn portable_prices_ignore_native_record_layout() -> Result<()> {
         .consume_fuel(true)
         .consume_lifting_fuel(Some(LiftingPrices {
             string_byte: 2,
-            typed_collection_abi_byte: 3,
-            dynamic_value_slot: 5,
-            copied_name_byte: 7,
+            lift_value: 3,
+            metadata_byte: 7,
         }));
     let engine = Engine::new(&config)?;
     let component = Component::new(
@@ -869,20 +866,20 @@ fn portable_prices_ignore_native_record_layout() -> Result<()> {
     let padded = instance.get_typed_func::<(u32,), (Vec<PaddedRecord>,)>(&mut store, "run")?;
     compact.call(&mut store, (0,))?;
     let instructions = 10_000 - store.get_fuel()?;
-    store.set_fuel(instructions + 3)?;
+    store.set_fuel(instructions + 2 * 3 + 6 * 7)?;
     assert_eq!(compact.call(&mut store, (1,))?.0[0].value, 0);
     assert_eq!(store.get_fuel()?, 0);
-    store.set_fuel(instructions + 3)?;
+    store.set_fuel(instructions + 2 * 3 + 6 * 7)?;
     assert_eq!(padded.call(&mut store, (1,))?.0[0].value, 0);
     assert_eq!(store.get_fuel()?, 0);
-    // One list slot, one field slot, and the five-byte field name.
-    store.set_fuel(instructions + 2 * 5 + 5 * 7)?;
+    // Typed and dynamic bindings share the record/scalar and name tariff.
+    store.set_fuel(instructions + 2 * 3 + 6 * 7)?;
     let mut result = [Val::Bool(false)];
     compact
         .func()
         .call(&mut store, &[Val::U32(1)], &mut result)?;
     assert_eq!(store.get_fuel()?, 0);
-    store.set_fuel(instructions + 3 - 1)?;
+    store.set_fuel(instructions + 2 * 3 + 6 * 7 - 1)?;
     let error = padded.call(&mut store, (1,)).unwrap_err();
     assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
     assert_eq!(store.get_fuel()?, 0);
@@ -893,7 +890,7 @@ fn portable_prices_ignore_native_record_layout() -> Result<()> {
 fn dynamic_map_prices_count_keys_and_values() -> Result<()> {
     let mut config = config();
     let mut table = prices(0);
-    table.dynamic_value_slot = 7;
+    table.lift_value = 7;
     config.consume_fuel(true).consume_lifting_fuel(Some(table));
     let (mut store, run, instructions) = map_fixture(&config)?;
     store.set_hostcall_fuel_enabled(false);
@@ -951,9 +948,8 @@ fn nested_strings_charge_each_category_and_retain_partial_charges() -> Result<()
                 .consume_fuel(true)
                 .consume_lifting_fuel(Some(LiftingPrices {
                     string_byte: 2,
-                    typed_collection_abi_byte: 3,
-                    dynamic_value_slot: 5,
-                    copied_name_byte: 7,
+                    lift_value: 3,
+                    metadata_byte: 7,
                 }));
             let engine = Engine::new(&config)?;
             let wat = r#"(component
@@ -982,11 +978,7 @@ fn nested_strings_charge_each_category_and_retain_partial_charges() -> Result<()
             let run = instance.get_typed_func::<(u32,), (Vec<String>,)>(&mut store, "run")?;
             run.call(&mut store, (0,))?;
             let instructions = 10_000 - store.get_fuel()?;
-            let charge = if dynamic {
-                2 * 5 + 7 * 2
-            } else {
-                2 * 8 * 3 + 7 * 2
-            };
+            let charge = 2 * 3 + 7 * 2;
             store.set_fuel(instructions + charge + 11)?;
             let outcome = if dynamic {
                 run.func()

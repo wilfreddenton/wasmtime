@@ -29,6 +29,7 @@ mod stream_contract;
 mod stream_sync_dropped;
 mod strings;
 mod sync_call_inline;
+mod work_metering;
 
 #[derive(Copy, Clone)]
 enum ApiStyle {

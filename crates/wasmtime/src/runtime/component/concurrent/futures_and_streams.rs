@@ -3,7 +3,6 @@ use super::{Event, GlobalErrorContextRefCount, Waitable, WaitableCommon};
 use crate::component::concurrent::{
     ConcurrentState, CurrentThread, QualifiedThreadId, WorkItem, tls,
 };
-use crate::component::func::LiftingKind;
 use crate::component::func::{self, LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::resources::{HostResourceIndex, HostResourceTables};
@@ -299,6 +298,8 @@ fn lift<T: func::Lift + Send + 'static, B: ReadBuffer<T>>(
 ) -> Result<()> {
     let count = count.min(buffer.remaining_capacity());
     if T::IS_RUST_UNIT_TYPE {
+        // Payloadless items still admit one logical value per delivered item.
+        lift.consume_structure(ty.unwrap_or(InterfaceType::Bool), count)?;
         // SAFETY: `T::IS_RUST_UNIT_TYPE` is only true for `()`, a
         // zero-sized type, so `MaybeUninit::uninit().assume_init()`
         // is a valid way to populate the zero-sized buffer.
@@ -883,6 +884,12 @@ impl<'a, T> Source<'a, T> {
     }
 
     /// Accept zero or more items from the writer.
+    ///
+    /// Lifting errors, including fuel exhaustion, must be propagated by the
+    /// consumer so that Wasmtime's existing trap handling can terminate the
+    /// operation. Lifting does not roll back ownership transfers: an incomplete
+    /// item may already have transferred handles, so retrying a failed read is
+    /// unsupported. Completed items in `buffer` remain the host's responsibility.
     pub fn read<B, S: AsContextMut>(&mut self, mut store: S, buffer: &mut B) -> Result<()>
     where
         T: func::Lift + 'static,
@@ -985,7 +992,9 @@ pub struct DirectSource<'a, D: 'static> {
 #[cfg(feature = "std")]
 impl<D: 'static> std::io::Read for DirectSource<'_, D> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let rem = self.remaining().map_err(std::io::Error::other)?;
+        let rem = self
+            .remaining_for_read(buf.len())
+            .map_err(std::io::Error::other)?;
         let n = rem.len().min(buf.len());
         buf[..n].copy_from_slice(&rem[..n]);
         self.mark_read(n);
@@ -995,7 +1004,22 @@ impl<D: 'static> std::io::Read for DirectSource<'_, D> {
 
 impl<D: 'static> DirectSource<'_, D> {
     /// Provide direct access to the writer's buffer.
+    ///
+    /// Borrowing bytes does not consume lifting fuel. Processing or copying this
+    /// borrowed slice is host work and must be charged by the embedder. The
+    /// `std::io::Read` implementation charges guest bytes before copying them.
+    /// Consumers must propagate read errors, including fuel exhaustion, as
+    /// described by [`Source::read`].
     pub fn remaining(&mut self) -> Result<&[u8]> {
+        self.remaining_impl(usize::MAX, false)
+    }
+
+    #[cfg(feature = "std")]
+    fn remaining_for_read(&mut self, limit: usize) -> Result<&[u8]> {
+        self.remaining_impl(limit, true)
+    }
+
+    fn remaining_impl(&mut self, limit: usize, charge: bool) -> Result<&[u8]> {
         if let Some(buffer) = self.host_buffer.as_deref_mut() {
             return Ok(buffer.remaining());
         }
@@ -1021,6 +1045,11 @@ impl<D: 'static> DirectSource<'_, D> {
             bail_bug!("expected ReadState::HostReady")
         };
 
+        let len = (count.as_usize() - guest_offset.as_usize()).min(limit);
+        if charge {
+            LiftContext::new(self.store.0, options, instance)?
+                .consume_structure(InterfaceType::U8, len)?;
+        }
         let memory = instance
             .options_memory(self.store.0, options)
             .get(
@@ -1030,7 +1059,7 @@ impl<D: 'static> DirectSource<'_, D> {
                     address + guest_offset.as_usize()
                 }..,
             )
-            .and_then(|b| b.get(..(count.as_usize() - guest_offset.as_usize())));
+            .and_then(|b| b.get(..len));
         match memory {
             Some(memory) => Ok(memory),
             None => bail_bug!("guest buffer unexpectedly out of bounds"),
@@ -3498,12 +3527,7 @@ impl Instance {
                     let store_opaque = store.store_opaque_mut();
                     let lift = &mut LiftContext::new(store_opaque, write_options, write_instance)?;
                     let bytes = &lift.memory()[write_address..][..write_length_in_bytes];
-                    lift.consume_fuel(
-                        count,
-                        size_of::<Val>().max(1),
-                        1,
-                        LiftingKind::DynamicValue,
-                    )?;
+                    lift.consume_fuel_array(count, size_of::<Val>())?;
 
                     let values = (0..count)
                         .map(|index| {
@@ -4385,6 +4409,7 @@ impl Instance {
         debug_msg_len: u32,
     ) -> Result<u32> {
         let lift_ctx = &mut LiftContext::new(store, options, self)?;
+        lift_ctx.consume_structure(InterfaceType::String, 1)?;
         let debug_msg = String::linear_lift_from_flat(
             lift_ctx,
             InterfaceType::String,

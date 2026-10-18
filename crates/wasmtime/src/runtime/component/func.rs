@@ -625,6 +625,7 @@ impl Func {
         src: &'a [ValRaw],
         max_flat: usize,
     ) -> Result<Box<dyn Iterator<Item = Result<Val>> + 'a>> {
+        cx.consume_structure(results_ty, 1)?;
         let results_ty = match results_ty {
             InterfaceType::Tuple(i) => &cx.types[i],
             _ => unreachable!(),

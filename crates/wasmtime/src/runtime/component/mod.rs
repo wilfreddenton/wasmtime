@@ -116,6 +116,7 @@ mod storage;
 pub(crate) mod store;
 pub mod types;
 mod values;
+mod work;
 pub use self::component::{Component, ComponentExportIndex, ExportLookup};
 #[cfg(feature = "task-group-hook")]
 pub use self::concurrent::TaskGroupHook;

@@ -64,8 +64,8 @@ pub struct ComponentStoreData {
     /// Fuel to be used for each time the guest calls the host or transfers data
     /// to the host.
     ///
-    /// Caps the size of the allocations made on the host to this amount
-    /// effectively.
+    /// Uses native payload sizes as an approximate allocation bound; allocator
+    /// and container overhead are not included.
     hostcall_fuel: usize,
     hostcall_fuel_enabled: bool,
 }
@@ -556,6 +556,8 @@ impl<T> Store<T> {
     /// Disabling it skips native allocation accounting for subsequent lifting
     /// contexts, while preserving memory bounds and type validation. The value
     /// configured with [`Store::set_hostcall_fuel`] is retained for re-enabling.
+    /// This switch only controls component lifting. Separate consumers of
+    /// [`Store::hostcall_fuel`], such as Wiggle bindings, are unaffected.
     ///
     /// Without this allowance, embedders must bound guest-induced host work and
     /// allocations through other means, such as appropriately priced lifting
@@ -565,13 +567,13 @@ impl<T> Store<T> {
         self.as_context_mut().set_hostcall_fuel_enabled(enabled);
     }
 
-    /// Returns the amount of "hostcall fuel" used for guest-to-host component
-    /// calls.
+    /// Returns the configured native allocation allowance for guest-to-host
+    /// transfers, rather than a remaining balance.
     ///
     /// This is either the default amount if it hasn't been configured or
     /// returns the last value passed to [`Store::set_hostcall_fuel`].
     ///
-    /// See [`Store::set_hostcall_fuel`] `for more details.
+    /// See [`Store::set_hostcall_fuel`] for more details.
     pub fn hostcall_fuel(&self) -> usize {
         self.as_context().0.hostcall_fuel()
     }
@@ -586,15 +588,18 @@ impl<T> Store<T> {
     /// guest from causing the host to allocate an unbounded amount of memory
     /// for example.
     ///
-    /// Fuel is considered distinct for each host call. The host is responsible
-    /// for ensuring it retains a proper amount of data between host calls if
-    /// applicable. The `fuel` provided here will be the initial value for each
-    /// time the guest calls the host.
+    /// Component lifting starts with a fresh allowance for each lifting context,
+    /// including host import arguments, guest export results, and deferred
+    /// [`WasmList`](crate::component::WasmList) access. It is not a cumulative
+    /// Store budget. The host is responsible for bounding data retained across
+    /// these operations.
     ///
-    /// The `fuel` value roughly corresponds to the maximal number of bytes
-    /// that the guest may transfer to the host in one call. Collection charges
-    /// use at least one unit per element, even when the element's Rust
-    /// representation is zero-sized.
+    /// The `fuel` value approximates native payload bytes allocated or copied
+    /// during lifting. Collection elements use their native Rust size, which
+    /// can depend on the host type, target, and compiler. Zero-sized native
+    /// elements consume no outer collection allowance, although nested values
+    /// can incur their own charges. Container and allocator overhead are not
+    /// included, so this is not an exact native memory limit.
     ///
     /// Note that data transferred from the host to the guest is not limited
     /// because it's already resident on the host itself. Only data from the
@@ -604,8 +609,11 @@ impl<T> Store<T> {
     ///
     /// With [`crate::Config::consume_lifting_fuel`] configured, separate portable
     /// lifting units consume Store fuel. When enabled, this native allowance is
-    /// checked first and is not scaled by the Store fuel prices. Setting its
-    /// amount does not change [`Store::hostcall_fuel_enabled`].
+    /// not scaled by the Store fuel prices. Checks occur at individual lifting
+    /// checkpoints, so earlier Store fuel deductions can precede an allowance
+    /// failure. For accounting independent of native Rust layouts, disable the
+    /// allowance with [`Store::set_hostcall_fuel_enabled`]. Setting its amount
+    /// does not change [`Store::hostcall_fuel_enabled`].
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

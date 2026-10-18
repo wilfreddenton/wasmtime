@@ -1,8 +1,10 @@
+use crate::StoreContextMut;
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent::ConcurrentState;
 use crate::component::matching::InstanceType;
 use crate::component::resources::{HostResourceData, HostResourceIndex, HostResourceTables};
 use crate::component::store::ComponentTaskState;
+use crate::component::work::WorkWeights;
 use crate::component::{Instance, ResourceType, RuntimeInstance};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
@@ -10,13 +12,12 @@ use crate::runtime::vm::component::{
 };
 use crate::runtime::vm::{UncaughtException, VMFuncRef};
 use crate::store::{StoreFuel, StoreId, StoreOpaque};
-use crate::{LiftingPrices, StoreContextMut};
 use alloc::sync::Arc;
 use core::fmt;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use wasmtime_environ::component::{
-    CanonicalOptions, CanonicalOptionsDataModel, ComponentTypes, OptionsIndex,
+    CanonicalOptions, CanonicalOptionsDataModel, ComponentTypes, InterfaceType, OptionsIndex,
     TypeResourceTableIndex,
 };
 
@@ -364,7 +365,7 @@ pub struct LiftContext<'a> {
     /// This is decremented for strings/lists, for example, to cap the size of
     /// data the host allocates on behalf of the guest.
     hostcall_fuel: Option<usize>,
-    store_fuel: Option<StoreFuel<'a>>,
+    lifting: Option<(StoreFuel<'a>, &'a WorkWeights)>,
 }
 
 #[doc(hidden)]
@@ -404,7 +405,12 @@ impl<'a> LiftContext<'a> {
             handle_counter,
             host_resource_data,
             hostcall_fuel,
-            store_fuel,
+            lifting: store_fuel.map(|fuel| {
+                (
+                    fuel,
+                    component.work_weights().expect("lifting weights missing"),
+                )
+            }),
         })
     }
 
@@ -531,31 +537,39 @@ impl<'a> LiftContext<'a> {
         self.resource_tables().validate_scope_exit()
     }
 
-    pub(crate) fn consume_fuel(
-        &mut self,
-        len: usize,
-        native_size: usize,
-        units_per_element: usize,
-        kind: LiftingKind,
-    ) -> Result<()> {
-        // Skip native arithmetic entirely when the allowance is disabled, so
-        // native layout cannot affect either acceptance or charged fuel.
-        let new = self
-            .hostcall_fuel
-            .map(|remaining| {
-                len.checked_mul(native_size)
-                    .and_then(|native| remaining.checked_sub(native))
-                    .ok_or(HostcallFuelExhausted)
-            })
-            .transpose()?;
-        if let Some(fuel) = &mut self.store_fuel {
-            fuel.consume_product(
-                len as u64,
-                units_per_element as u64,
-                kind.price(fuel.prices),
-            )?;
+    pub(crate) fn consume_structure(&mut self, ty: InterfaceType, count: usize) -> Result<()> {
+        if let Some((fuel, weights)) = &mut self.lifting {
+            let weight = weights.get(ty);
+            let prices = fuel.prices;
+            fuel.consume_quantity(count as u64, weight.nodes, prices.lift_value)?;
+            fuel.consume_quantity(count as u64, weight.metadata, prices.metadata_byte)?;
         }
-        self.hostcall_fuel = new;
+        Ok(())
+    }
+
+    pub(crate) fn consume_string(&mut self, bytes: usize) -> Result<()> {
+        self.consume_fuel(bytes)?;
+        if let Some((fuel, _)) = &mut self.lifting {
+            fuel.consume_product(bytes as u64, 1, fuel.prices.string_byte)?;
+        }
+        Ok(())
+    }
+
+    /// Consumes bytes from the native host allocation allowance when enabled.
+    /// This allowance is independent of Wasm fuel and portable lifting charges.
+    pub fn consume_fuel(&mut self, bytes: usize) -> Result<()> {
+        self.consume_fuel_array(bytes, 1)
+    }
+
+    /// Same as [`Self::consume_fuel`], with checked multiplication of `len` and
+    /// `size`. Disabling the allowance also skips this multiplication.
+    pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
+        if let Some(remaining) = &mut self.hostcall_fuel {
+            *remaining = len
+                .checked_mul(size)
+                .and_then(|amount| remaining.checked_sub(amount))
+                .ok_or(HostcallFuelExhausted)?;
+        }
         Ok(())
     }
 }
@@ -574,21 +588,3 @@ impl fmt::Display for HostcallFuelExhausted {
 }
 
 impl core::error::Error for HostcallFuelExhausted {}
-
-pub(crate) enum LiftingKind {
-    String,
-    TypedCollection,
-    DynamicValue,
-    Name,
-}
-
-impl LiftingKind {
-    fn price(self, prices: LiftingPrices) -> u64 {
-        match self {
-            Self::String => prices.string_byte,
-            Self::TypedCollection => prices.typed_collection_abi_byte,
-            Self::DynamicValue => prices.dynamic_value_slot,
-            Self::Name => prices.copied_name_byte,
-        }
-    }
-}

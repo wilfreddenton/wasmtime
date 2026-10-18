@@ -997,8 +997,8 @@ impl<T> Store<T> {
         self.inner.get_fuel()
     }
 
-    /// Set the fuel available for Wasm execution. Component lifting also consumes
-    /// this fuel when `Config::consume_lifting_fuel` is enabled.
+    /// Set the fuel available for Wasm execution. Configured component lifting
+    /// consumes this same budget when enabled.
     ///
     /// For this method to work fuel consumption must be enabled via
     /// [`Config::consume_fuel`](crate::Config::consume_fuel). By default a
@@ -1544,11 +1544,22 @@ pub(crate) struct StoreFuel<'a> {
 #[cfg(feature = "component-model")]
 impl StoreFuel<'_> {
     pub(crate) fn consume_product(&mut self, count: u64, units: u64, price: u64) -> Result<()> {
+        self.consume_quantity(count, Some(units), price)
+    }
+
+    pub(crate) fn consume_quantity(
+        &mut self,
+        count: u64,
+        units: Option<u64>,
+        price: u64,
+    ) -> Result<()> {
         let remaining = get_fuel(*self.injected, *self.reserve);
-        let amount = if price == 0 || count == 0 || units == 0 {
+        let amount = if price == 0 || count == 0 || units == Some(0) {
             Some(0)
         } else {
-            count.checked_mul(units).and_then(|n| n.checked_mul(price))
+            units
+                .and_then(|units| count.checked_mul(units))
+                .and_then(|n| n.checked_mul(price))
         };
         let amount = match amount {
             Some(amount) if amount <= remaining => amount,
@@ -1582,15 +1593,12 @@ impl StoreOpaque {
     pub(crate) fn component_data_and_fuel_mut(
         &mut self,
     ) -> (&mut ComponentStoreData, Option<StoreFuel<'_>>) {
-        let fuel = self
-            .engine
-            .config()
-            .consume_lifting_fuel
-            .map(|prices| StoreFuel {
-                injected: self.vm_store_context.fuel_consumed.get_mut(),
-                reserve: &mut self.fuel_reserve,
-                prices,
-            });
+        let prices = self.engine.config().consume_lifting_fuel;
+        let fuel = prices.map(|prices| StoreFuel {
+            injected: self.vm_store_context.fuel_consumed.get_mut(),
+            reserve: &mut self.fuel_reserve,
+            prices,
+        });
         (&mut self.store_data.components, fuel)
     }
 
@@ -2686,12 +2694,37 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(feature = "component-model")]
+    fn component_overflowed_weights_preserve_zero_factors() -> Result<()> {
+        for (count, price, exhausted) in [(1, 1, true), (0, 1, false), (1, 0, false)] {
+            let mut tank = FuelTank::new();
+            tank.set_fuel(100);
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
+                prices: TEST_LIFTING_PRICES,
+            }
+            .consume_quantity(count, None, price);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+                assert_eq!(tank.get_fuel(), 0);
+            } else {
+                result?;
+                assert_eq!(tank.get_fuel(), 100);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "component-model")]
     const TEST_LIFTING_PRICES: LiftingPrices = LiftingPrices {
         string_byte: 1,
-        typed_collection_abi_byte: 1,
-        dynamic_value_slot: 1,
-        copied_name_byte: 1,
+        lift_value: 1,
+        metadata_byte: 1,
     };
 
     #[test]

@@ -36,42 +36,61 @@ pub use wasmtime_cache::{Cache, CacheConfig};
 pub use wasmtime_environ::CacheStore;
 pub use wasmtime_environ::Inlining;
 
-/// Store fuel prices for component lifting, configured with
+/// Store fuel prices for guest-to-host component lifting, configured with
 /// [`Config::consume_lifting_fuel`].
 ///
-/// Quantities use canonical ABI sizes, byte counts, and value counts, never
-/// native Rust layout. These are accounting units, not measured native memory
-/// usage. Typed and dynamic bindings can charge different quantities.
+/// Quantities depend on component types and canonical string encodings, never
+/// native Rust layouts. Prices cover built-in and derived bindings for guest
+/// arguments, guest results, deferred value access, and inbound stream/future
+/// payloads. These are logical admission units, not measured CPU or memory use.
 ///
-/// Prices apply independently and add across nested values. Every checkpoint
-/// computes `count * units_per_element * price` with checked `u64` arithmetic.
-/// A zero price makes that category free, including when its unpriced quantity
-/// would overflow. No default prices are supplied: embedders choose all four.
+/// Fixed structure is admitted before traversal. Variable collection contents
+/// and string bytes are admitted at their own checkpoints. Variants, options,
+/// and results reserve their largest static payload, including absent payloads.
+/// Earlier deductions remain consumed when a later check or conversion fails.
+/// Typed and dynamic bindings share successful structural charges; malformed
+/// values can fail at different checkpoints and retain different charges.
+/// Host stream/future consumers must propagate lifting errors, including fuel
+/// exhaustion, through the existing trap path. Partially lifted items may
+/// already have transferred handles; retrying a failed lift is unsupported.
 ///
-/// The units and charging behavior are part of this API's compatibility
-/// contract. Changes to them require a breaking release. Embedders requiring
-/// historical replay should pin the runtime, retain their price tables, and
-/// check exact charges and failure outcomes when upgrading.
+/// Lowering, host result staging, and direct guest-to-guest adapter conversion
+/// are outside this meter's scope. Intermediate lifting through host values may
+/// still be charged. Custom unsafe bindings and application host code remain
+/// the embedder's responsibility, including processing raw borrowed byte views.
+/// This is not a complete component execution budget or a memory limit.
+///
+/// Zero prices opt out of a category, including quantities that overflow.
+/// The native allocation allowance remains independent and uses Rust layouts
+/// when enabled. It can be disabled with `Store::set_hostcall_fuel_enabled`.
+/// Disable it when accounting must be independent of native layouts on
+/// failure paths as well as successful lifts.
+///
+/// Charging units and behavior are part of this API's compatibility contract;
+/// changes require a breaking release. Embedders requiring historical replay
+/// should pin the runtime and prices and validate exact costs when upgrading.
 #[cfg(feature = "component-model")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiftingPrices {
-    /// Fuel per byte in a string's guest encoding. UTF-8 and Latin-1 use their
-    /// byte lengths; UTF-16 uses two bytes per code unit. Charged when the string
-    /// is lifted, including lazy `WasmStr` construction, before decoding.
+    /// Per admitted value node when lifting. Records, tuples and fixed arrays
+    /// include their descendants; variable containers charge elements separately.
+    /// Variants, options and results reserve the largest static payload, even
+    /// when another case is selected. Function parameter/result tuples count
+    /// when lifted. Stream/future payloads charge their value shape per item;
+    /// payloadless items count as one node. Direct guest byte reads count one
+    /// node per copied byte. Repeated lazy list access admits the requested
+    /// elements again, including unused elements of a dropped iterator.
+    /// A handle node covers runtime transfer bookkeeping; application
+    /// and guest destructor execution retain their separate accounting.
+    pub lift_value: u64,
+    /// Per source byte in the guest encoding for lifted strings, including
+    /// bounded validation, decoding and copying. UTF-16 counts two bytes per
+    /// code unit; UTF-8 and Latin-1 count their encoded bytes. Lazy string
+    /// construction and each metered decoding call are charged separately.
     pub string_byte: u64,
-    /// Fuel per canonical ABI byte of typed list elements or map entries.
-    /// Each element/entry uses at least one unit, even for a zero-sized type.
-    /// Includes lazy list construction and typed stream reads that lift lists.
-    /// Nested strings and collections incur their own additional charges.
-    pub typed_collection_abi_byte: u64,
-    /// Fuel per dynamic `Val` slot: each list/tuple/record element, each map key
-    /// and value, and each present boxed variant/option/result payload. Dynamic
-    /// stream staging also charges its slots. Scalar values alone have no slot
-    /// charge. Nested container slots are charged recursively.
-    pub dynamic_value_slot: u64,
-    /// Fuel per UTF-8 byte of a name copied into a dynamic value (record field,
-    /// variant case, enum case, or selected flag name).
-    pub copied_name_byte: u64,
+    /// Per declared metadata name byte plus one per name, including unselected
+    /// cases/flags in the admitted lifted type.
+    pub metadata_byte: u64,
 }
 
 pub(crate) const DEFAULT_WASM_BACKTRACE_MAX_FRAMES: NonZeroUsize = NonZeroUsize::new(20).unwrap();
@@ -687,23 +706,19 @@ impl Config {
         self
     }
 
-    /// Configures Store fuel prices for component lifting.
+    /// Configures fuel accounting for guest-to-host component lifting.
     ///
-    /// `None` (the default) disables lifting charges. `Some(prices)` requires
-    /// [`Config::consume_fuel`] and charges the shared Store fuel budget according
-    /// to [`LiftingPrices`]. Prices may be zero.
+    /// `None` (the default) leaves lifting unmetered. `Some(prices)` enables
+    /// the tariff described by [`LiftingPrices`]. With metering enabled,
+    /// `WasmStr::to_str` returns an error: use `WasmStr::to_str_metered` with
+    /// mutable Store access to charge each decode.
     ///
-    /// The native allocation allowance is independent. When enabled, it is
-    /// checked before each Store fuel deduction. See
-    /// [`Store::set_hostcall_fuel_enabled`](crate::Store::set_hostcall_fuel_enabled).
-    /// Insufficient Store fuel or charge overflow exhausts the balance and traps
-    /// with [`Trap::OutOfFuel`](crate::Trap::OutOfFuel). Earlier deductions are
-    /// retained if a later check or conversion fails.
-    ///
-    /// Charges occur at allocation/copy checkpoints, before the associated work.
-    /// Memory range checks precede string/list charges; content validation such
-    /// as UTF-8 validation follows them. This does not meter arbitrary host work,
-    /// repeated decoding through `WasmStr::to_str`, or host-side lowering.
+    /// Requires [`Self::consume_fuel`]. Deductions precede admitted work, share
+    /// the Store instruction budget, and are retained on failure. Overflow or
+    /// insufficient fuel exhausts the budget and traps. This does not yield
+    /// within native work, impose a memory limit, or replace host operation costs.
+    /// The existing native allocation allowance remains independent.
+    /// Compilation and instantiation are outside the lifting tariff.
     #[cfg(feature = "component-model")]
     pub fn consume_lifting_fuel(&mut self, prices: Option<LiftingPrices>) -> &mut Self {
         self.consume_lifting_fuel = prices;
@@ -5214,7 +5229,7 @@ impl Engine {
         self.tunables().consume_fuel
     }
 
-    /// Returns the configured [`Config::consume_lifting_fuel`] value.
+    /// Returns the configured [`Config::consume_lifting_fuel`] prices.
     #[cfg(feature = "component-model")]
     pub fn get_consume_lifting_fuel(&self) -> Option<LiftingPrices> {
         self.config().consume_lifting_fuel

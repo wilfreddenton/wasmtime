@@ -339,6 +339,24 @@ impl TypeTrace for ComponentTypes {
 }
 
 impl ComponentTypes {
+    /// Enumerates composite value types for runtime accounting precomputation.
+    pub fn work_accounting_types(&self) -> impl Iterator<Item = InterfaceType> + '_ {
+        self.records
+            .keys()
+            .map(InterfaceType::Record)
+            .chain(self.tuples.keys().map(InterfaceType::Tuple))
+            .chain(self.variants.keys().map(InterfaceType::Variant))
+            .chain(self.enums.keys().map(InterfaceType::Enum))
+            .chain(self.flags.keys().map(InterfaceType::Flags))
+            .chain(self.options.keys().map(InterfaceType::Option))
+            .chain(self.results.keys().map(InterfaceType::Result))
+            .chain(
+                self.fixed_length_lists
+                    .keys()
+                    .map(InterfaceType::FixedLengthList),
+            )
+    }
+
     /// Returns the core wasm module types known within this component.
     pub fn module_types(&self) -> &ModuleTypes {
         self.module_types.as_ref().unwrap()

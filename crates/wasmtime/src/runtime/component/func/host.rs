@@ -677,6 +677,7 @@ where
 
     fn lift_params(cx: &mut LiftContext<'_>, ty: TypeFuncIndex, src: Source<'_>) -> Result<P> {
         let ty = InterfaceType::Tuple(cx.types[ty].params);
+        cx.consume_structure(ty, 1)?;
         match src {
             Source::Flat(storage) => {
                 // SAFETY: the contract of `ComponentType` for `P` means that
@@ -762,6 +763,7 @@ where
         ty: TypeFuncIndex,
         src: Source<'_>,
     ) -> Result<(ComponentFunc, Vec<Val>)> {
+        cx.consume_structure(InterfaceType::Tuple(cx.types[ty].params), 1)?;
         let param_tys = &cx.types[cx.types[ty].params];
         let mut params = Vec::new();
         match src {

@@ -2,6 +2,7 @@ use crate::component::matching::InstanceType;
 use crate::component::types;
 #[cfg(feature = "wit-parser")]
 use crate::component::wit_parser::ItemName;
+use crate::component::work::WorkWeights;
 use crate::prelude::*;
 #[cfg(feature = "std")]
 use crate::runtime::vm::open_file_for_mmap;
@@ -112,6 +113,7 @@ struct ComponentInner {
 
     /// The checksum of the source binary from which the module was compiled.
     checksum: WasmChecksum,
+    work_weights: Option<WorkWeights>,
 }
 
 impl fmt::Debug for Component {
@@ -465,6 +467,12 @@ impl Component {
 
         // Assemble the `EngineCode` artifact which is shared by all core wasm
         // modules as well as the final component.
+        let work_weights = engine
+            .config()
+            .consume_lifting_fuel
+            .is_some()
+            .then(|| WorkWeights::new(&types))
+            .transpose()?;
         let types = Arc::new(types);
         let code = Arc::new(EngineCode::new(code_memory, signatures, types.into())?);
 
@@ -495,8 +503,13 @@ impl Component {
                 index,
                 realloc_func_type,
                 checksum,
+                work_weights,
             }),
         })
+    }
+
+    pub(crate) fn work_weights(&self) -> Option<&WorkWeights> {
+        self.inner.work_weights.as_ref()
     }
 
     pub(crate) fn ty(&self) -> TypeComponentIndex {
