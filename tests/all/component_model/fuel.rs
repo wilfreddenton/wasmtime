@@ -752,7 +752,6 @@ fn portable_prices_ignore_native_record_layout() -> Result<()> {
         store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
         assert_eq!(padded.call(&mut store, (1,))?.0[0].value, 0);
         assert_eq!(store.get_fuel()?, 0);
-        // Typed and dynamic bindings share the record/scalar and name tariff.
         store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
         let mut result = [Val::Bool(false)];
         compact

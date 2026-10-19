@@ -5,8 +5,7 @@ use wasmtime_environ::component::{ComponentTypes, InterfaceType};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WorkWeight {
-    // `None` preserves overflow until the price is known: a zero price must
-    // still allow the lift, even when its unpriced weight exceeds u64::MAX.
+    // Preserve overflow as `None` so a zero price can still make it free.
     pub nodes: Option<u64>,
     pub metadata: Option<u64>,
 }

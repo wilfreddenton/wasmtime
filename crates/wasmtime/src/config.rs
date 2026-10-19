@@ -36,61 +36,43 @@ pub use wasmtime_cache::{Cache, CacheConfig};
 pub use wasmtime_environ::CacheStore;
 pub use wasmtime_environ::Inlining;
 
-/// Store fuel prices for guest-to-host component lifting, configured with
-/// [`Config::consume_lifting_fuel`].
+/// Store fuel prices for component lifting. See [`Config::consume_lifting_fuel`].
 ///
-/// Quantities depend on component types and canonical string encodings, never
-/// native Rust layouts. Prices cover built-in and derived bindings for guest
-/// arguments to host functions, guest function results, and deferred value
-/// access, plus the debug string supplied to `error-context.new`. These are
-/// logical admission units, not measured CPU or memory use.
+/// Charges use component types and guest string encodings, not Rust layouts.
+/// They cover guest arguments to host functions, guest function results (sync
+/// and async), deferred access, and `error-context.new` debug strings through
+/// built-in and derived bindings.
 ///
-/// Fixed structure is admitted before traversal. Variable collection contents
-/// and string bytes are admitted at their own checkpoints. Variants, options,
-/// and results reserve the maximum static node and metadata weights across
-/// their payloads, even when the selected case has no payload. These two
-/// maxima can come from different cases.
-/// Earlier deductions remain consumed when a later check or conversion fails.
-/// Typed and dynamic bindings share successful structural charges; malformed
-/// values can fail at different checkpoints and retain different charges.
-/// Metering applies to synchronous and asynchronous function calls. Stream and
-/// future payload transfers, lowering, host result staging, and guest-to-guest
-/// adapter conversion are outside this meter's scope.
-/// Stream/future handles passed as function arguments or results are still
-/// charged as values. Deferred value access is a separate metered operation,
-/// regardless of how the value was obtained.
-/// Custom unsafe bindings and application host code remain the embedder's
-/// responsibility, including processing raw borrowed byte views.
-/// This is not a complete component execution budget or a memory limit.
+/// Fixed structure is charged before traversal; variable collection contents
+/// and string bytes are charged separately. Variants, options, and results use
+/// the maximum static node and metadata weights across their payloads,
+/// regardless of the selected case. The two maxima may come from different cases.
+/// Valid values have equal structural charges across typed and dynamic bindings;
+/// malformed values may fail at different checkpoints and retain different charges.
+/// Zero prices disable a category, even when its quantity overflows.
 ///
-/// Zero prices opt out of a category, including quantities that overflow.
-/// The native allocation allowance remains independent and uses Rust layouts
-/// when enabled. It can be disabled with `Store::set_hostcall_fuel_enabled`.
-/// Disable it when accounting must be independent of native layouts on
-/// failure paths as well as successful lifts.
+/// Stream/future payload transfers, lowering, host result staging, guest-to-guest
+/// adapters, compilation, and instantiation are excluded. Stream/future handles
+/// passed as function values still incur a node charge. Application host work
+/// and custom unsafe bindings remain the embedder's responsibility.
 ///
-/// Charging units and behavior are part of this API's compatibility contract;
-/// changes require a breaking release. Embedders requiring historical replay
-/// should pin the runtime and prices and validate exact costs when upgrading.
+/// These are accounting units, not measured CPU use or a memory limit. The
+/// native allocation allowance is independent; see `Store::set_hostcall_fuel_enabled`.
+///
+/// Charging changes require a breaking release. For historical replay, pin the
+/// runtime and prices and check exact costs when upgrading.
 #[cfg(feature = "component-model")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiftingPrices {
-    /// Per admitted value node when lifting. Records, tuples and fixed arrays
-    /// include their descendants; variable containers charge elements separately.
-    /// Variants, options and results reserve the largest static payload, even
-    /// when another case is selected. Function parameter/result tuples count
-    /// when lifted. Repeated lazy list access admits the requested
-    /// elements again, including unused elements of a dropped iterator.
-    /// A handle node covers runtime transfer bookkeeping; application
-    /// and guest destructor execution retain their separate accounting.
+    /// Per value node, including fixed descendants and function parameter/result
+    /// tuples. Variable collections charge their elements separately.
     pub lift_value: u64,
-    /// Per source byte in the guest encoding for lifted strings, including
-    /// bounded validation, decoding and copying. UTF-16 counts two bytes per
-    /// code unit; UTF-8 and Latin-1 count their encoded bytes. Lazy string
-    /// construction and each metered decoding call are charged separately.
+    /// Per guest-encoded string byte: two per UTF-16 code unit, one per UTF-8 or
+    /// Latin-1 byte. Lazy string construction and each metered decode are charged
+    /// separately.
     pub string_byte: u64,
-    /// Per declared metadata name byte plus one per name, including unselected
-    /// cases/flags in the admitted lifted type.
+    /// Per UTF-8 metadata name byte, plus one per name, including unselected
+    /// cases and flags in the lifted type.
     pub metadata_byte: u64,
 }
 
@@ -707,20 +689,15 @@ impl Config {
         self
     }
 
-    /// Configures fuel accounting for component function lifting and deferred access.
+    /// Configures component lifting charges against Store fuel.
     ///
-    /// `None` (the default) leaves lifting unmetered. `Some(prices)` enables
-    /// the tariff described by [`LiftingPrices`]. With metering enabled,
-    /// `WasmStr::to_str` returns an error: use `WasmStr::to_str_metered` with
-    /// mutable Store access to charge each decode. This requirement also applies
-    /// when all configured prices are zero.
+    /// `None` (the default) disables these charges. `Some(prices)` requires
+    /// [`Self::consume_fuel`]; see [`LiftingPrices`] for units and scope.
+    /// Charges precede work and remain consumed on failure. Overflow or
+    /// insufficient fuel exhausts the budget and traps. Lifting does not yield.
     ///
-    /// Requires [`Self::consume_fuel`]. Deductions precede admitted work, share
-    /// the Store instruction budget, and are retained on failure. Overflow or
-    /// insufficient fuel exhausts the budget and traps. This does not yield
-    /// within native work, impose a memory limit, or replace host operation costs.
-    /// The existing native allocation allowance remains independent.
-    /// Compilation and instantiation are outside the lifting tariff.
+    /// When configured, even with all-zero prices, `WasmStr::to_str` returns an
+    /// error. Use `WasmStr::to_str_metered` with mutable Store access instead.
     #[cfg(feature = "component-model")]
     pub fn consume_lifting_fuel(&mut self, prices: Option<LiftingPrices>) -> &mut Self {
         self.consume_lifting_fuel = prices;

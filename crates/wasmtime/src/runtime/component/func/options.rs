@@ -360,16 +360,14 @@ pub struct LiftContext<'a> {
 
     task_state: &'a mut ComponentTaskState,
 
-    /// Remaining native allocation allowance for this lifting context, or
-    /// `None` when disabled. This is independent of Store fuel.
+    /// Native allocation allowance, independent of Store fuel; `None` disables it.
     hostcall_fuel: Option<usize>,
     lifting: Option<(StoreFuel<'a>, &'a WorkWeights)>,
 }
 
 #[doc(hidden)]
 impl<'a> LiftContext<'a> {
-    /// Creates a context honoring the native allowance setting, without
-    /// portable fuel charges.
+    /// Honors the native allowance but excludes portable lifting charges.
     #[inline]
     pub fn new(
         store: &'a mut StoreOpaque,
@@ -569,8 +567,7 @@ impl<'a> LiftContext<'a> {
         Ok(())
     }
 
-    /// Consumes bytes from the native host allocation allowance when enabled.
-    /// This allowance is independent of Wasm fuel and portable lifting charges.
+    /// Charges the native allocation allowance, independently of Store fuel.
     pub fn consume_fuel(&mut self, bytes: usize) -> Result<()> {
         self.consume_fuel_array(bytes, 1)
     }

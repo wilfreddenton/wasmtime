@@ -565,72 +565,42 @@ impl<T> Store<T> {
         self.as_context().0.hostcall_fuel_enabled()
     }
 
-    /// Enables or disables the native component allocation allowance.
+    /// Enables or disables the native component allocation allowance (default: `true`).
     ///
-    /// This defaults to `true` and is independent of
+    /// Applies to subsequent lifting contexts, independently of
     /// [`Config::consume_lifting_fuel`](crate::Config::consume_lifting_fuel).
-    /// Disabling it skips native allocation accounting for subsequent lifting
-    /// contexts, while preserving memory bounds and type validation. The value
-    /// configured with [`Store::set_hostcall_fuel`] is retained for re-enabling.
-    /// This switch only controls component lifting. Separate consumers of
-    /// [`Store::hostcall_fuel`], such as Wiggle bindings, are unaffected.
+    /// Disabling preserves the configured allowance, memory bounds checks, and
+    /// type validation.
+    /// Other users of [`Store::hostcall_fuel`], such as Wiggle, are unaffected.
     ///
-    /// Without this allowance, embedders must bound guest-induced host work and
-    /// allocations through other means, such as appropriately priced lifting
-    /// fuel and a finite Store fuel budget for covered operations. Excluded paths,
-    /// such as stream/future payload transfers, need separate protection. Lifting
-    /// prices are accounting units, not an exact native memory limit.
+    /// Embedders disabling this allowance must bound host allocations separately,
+    /// including on paths not covered by lifting fuel, such as stream/future payloads.
     pub fn set_hostcall_fuel_enabled(&mut self, enabled: bool) {
         self.as_context_mut().set_hostcall_fuel_enabled(enabled);
     }
 
-    /// Returns the configured native allocation allowance for guest-to-host
-    /// transfers, rather than a remaining balance.
-    ///
-    /// This is either the default amount if it hasn't been configured or
-    /// returns the last value passed to [`Store::set_hostcall_fuel`].
-    ///
-    /// See [`Store::set_hostcall_fuel`] for more details.
+    /// Returns the allowance configured by [`Store::set_hostcall_fuel`],
+    /// or its default, rather than a remaining balance.
     pub fn hostcall_fuel(&self) -> usize {
         self.as_context().0.hostcall_fuel()
     }
 
-    /// Sets the amount of "hostcall fuel" used for guest-to-host component
-    /// calls.
+    /// Sets the native allocation allowance for guest-to-host component lifting.
+    /// The default is 128 MiB.
     ///
-    /// Whenever the guest calls the host it often wants to transfer some data
-    /// as well, such as strings or lists. This configured fuel value can be
-    /// used to limit the amount of data that the host allocates on behalf of
-    /// the guest. This is a DoS mitigation mechanism to prevent a malicious
-    /// guest from causing the host to allocate an unbounded amount of memory
-    /// for example.
+    /// Each lifting context starts with a fresh allowance, including host import
+    /// arguments, guest export results, and deferred value access. This is not a
+    /// cumulative Store budget; the host must bound data retained across operations.
+    /// Host-to-guest transfers are not limited by this allowance.
     ///
-    /// Component lifting starts with a fresh allowance for each lifting context,
-    /// including host import arguments, guest export results, and deferred
-    /// [`WasmList`](crate::component::WasmList) access. It is not a cumulative
-    /// Store budget. The host is responsible for bounding data retained across
-    /// these operations.
+    /// Charges approximate native payload bytes, excluding container and allocator
+    /// overhead. Collection elements use their Rust size, which can vary by host
+    /// type, target, and compiler. Zero-sized elements consume no outer allowance.
     ///
-    /// The `fuel` value approximates native payload bytes allocated or copied
-    /// during lifting. Collection elements use their native Rust size, which
-    /// can depend on the host type, target, and compiler. Zero-sized native
-    /// elements consume no outer collection allowance, although nested values
-    /// can incur their own charges. Container and allocator overhead are not
-    /// included, so this is not an exact native memory limit.
-    ///
-    /// Note that data transferred from the host to the guest is not limited
-    /// because it's already resident on the host itself. Only data from the
-    /// guest to the host is limited.
-    ///
-    /// The default value for this is 128 MiB.
-    ///
-    /// With [`crate::Config::consume_lifting_fuel`] configured, separate portable
-    /// lifting units consume Store fuel. When enabled, this native allowance is
-    /// not scaled by the Store fuel prices. Checks occur at individual lifting
-    /// checkpoints, so earlier Store fuel deductions can precede an allowance
-    /// failure. For accounting independent of native Rust layouts, disable the
-    /// allowance with [`Store::set_hostcall_fuel_enabled`]. Setting its amount
-    /// does not change [`Store::hostcall_fuel_enabled`].
+    /// This allowance is independent of configured lifting prices. Native checks
+    /// may fail after Store fuel has been charged. For layout-independent failure
+    /// accounting, disable it with [`Store::set_hostcall_fuel_enabled`]. Setting
+    /// the amount does not change whether the allowance is enabled.
     pub fn set_hostcall_fuel(&mut self, fuel: usize) {
         self.as_context_mut().set_hostcall_fuel(fuel)
     }

@@ -1498,15 +1498,10 @@ fn lower_string<T>(cx: &mut LowerContext<'_, T>, string: &str) -> Result<(usize,
 /// a string. This type cannot be used to give a string to WebAssembly, instead
 /// `&str` should be used for that (since it's coming from the host).
 ///
-/// Note that this type represents an in-bounds string in linear memory, but it
-/// does not represent a valid string (e.g. valid utf-8). Validation happens
-/// when [`WasmStr::to_str`] is called.
-///
-/// Construction charges the guest-encoded byte length against the enabled
-/// native allowance, and against configured lifting fuel at metered entry
-/// points such as function arguments and results. When lifting fuel is enabled,
-/// decoding requires [`WasmStr::to_str_metered`] so each access can debit fuel,
-/// including for values obtained from otherwise unmetered transfers.
+/// This type checks bounds, but defers string validation until decoding.
+/// Construction charges encoded bytes against the enabled native allowance and, at
+/// metered entry points, lifting fuel. When lifting fuel is configured, decoding
+/// requires [`WasmStr::to_str_metered`], even for values from unmetered transfers.
 ///
 /// Also note that this type does not implement [`Lower`], it only implements
 /// [`Lift`].
@@ -1584,9 +1579,8 @@ impl WasmStr {
 
     /// Decodes the string while charging configured lifting fuel.
     ///
-    /// Each call admits the encoded input against a fresh native allowance and
-    /// the configured string-byte price before validation or transcoding.
-    /// Charges from construction remain consumed, including on failure.
+    /// Each call charges the encoded length again, before validation or transcoding,
+    /// using a fresh native allowance and the configured string-byte price.
     ///
     /// # Errors
     ///
@@ -1786,22 +1780,18 @@ where
 /// for example. This type represents a list of values that are stored in linear
 /// memory which are waiting to be read.
 ///
-/// Note that this type represents only a valid range of bytes for the list
-/// itself, it does not represent validity of the elements themselves and that's
-/// performed when they're iterated. Construction charges the list's native
-/// storage against the enabled allocation allowance. At metered entry points
-/// such as function arguments and results, it also charges element shapes
-/// against configured lifting fuel, even though it does not copy the elements.
+/// Construction checks bounds and charges native storage against the allocation
+/// allowance. Metered entry points also charge static element weights without
+/// copying or validating the elements.
 ///
-/// Lifting elements through [`Self::get`] or [`Self::iter`] can incur additional
-/// charges for nested values and fail if an enabled allowance is insufficient.
-/// Each `get` or `iter` call starts with a fresh native allowance; an iterator
-/// shares that allowance across its elements. Store fuel is shared across all
-/// these operations and is not reset. Repeated access repeats nested charges.
-/// Configured lifting fuel admits each accessed element's static shape on
-/// `get`, and the whole requested range on `iter`, even if the iterator is
-/// dropped early. These accesses are metered regardless of how the list was
-/// obtained.
+/// [`Self::get`] and [`Self::iter`] always apply configured lifting charges,
+/// regardless of how the list was obtained. Each access charges static element
+/// weights again, plus any nested lifting work. `iter` charges all element weights
+/// up front, even if dropped early. Invalid elements or insufficient budgets
+/// cause errors.
+///
+/// Each access starts with a fresh native allowance, shared across an iterator's
+/// elements. Store fuel is cumulative across accesses.
 ///
 /// Note that this type does not implement the [`Lower`] trait, only [`Lift`].
 pub struct WasmList<T> {
