@@ -707,57 +707,63 @@ struct PaddedRecord {
 
 #[test]
 fn portable_prices_ignore_native_record_layout() -> Result<()> {
-    assert_ne!(size_of::<CompactRecord>(), size_of::<PaddedRecord>());
-    let mut config = config();
-    config
-        .consume_fuel(true)
-        .consume_lifting_fuel(Some(LiftingPrices {
-            string_byte: 2,
-            lift_value: 3,
-            metadata_byte: 7,
-        }));
-    let engine = Engine::new(&config)?;
-    let component = Component::new(
-        &engine,
-        r#"(component
-        (type $r' (record (field "value" u8)))
-        (export $r "r" (type $r'))
-        (core module $m
-            (memory (export "memory") 1)
-            (data (i32.const 0) "\10\00\00\00")
-            (func (export "run") (param $length i32) (result i32)
-                (i32.store (i32.const 4) (local.get $length))
-                (i32.const 0)))
-        (core instance $i (instantiate $m))
-        (func (export "run") (param "length" u32) (result (list $r))
-            (canon lift (core func $i "run") (memory (core memory $i "memory")))))"#,
-    )?;
-    let mut store = Store::new(&engine, ());
-    store.set_fuel(10_000)?;
-    store.set_hostcall_fuel(0);
-    store.set_hostcall_fuel_enabled(false);
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let compact = instance.get_typed_func::<(u32,), (Vec<CompactRecord>,)>(&mut store, "run")?;
-    let padded = instance.get_typed_func::<(u32,), (Vec<PaddedRecord>,)>(&mut store, "run")?;
-    compact.call(&mut store, (0,))?;
-    let empty_call_cost = 10_000 - store.get_fuel()?;
-    store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
-    assert_eq!(compact.call(&mut store, (1,))?.0[0].value, 0);
-    assert_eq!(store.get_fuel()?, 0);
-    store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
-    assert_eq!(padded.call(&mut store, (1,))?.0[0].value, 0);
-    assert_eq!(store.get_fuel()?, 0);
-    // Typed and dynamic bindings share the record/scalar and name tariff.
-    store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
-    let mut result = [Val::Bool(false)];
-    compact
-        .func()
-        .call(&mut store, &[Val::U32(1)], &mut result)?;
-    assert_eq!(store.get_fuel()?, 0);
-    store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7 - 1)?;
-    let error = padded.call(&mut store, (1,)).unwrap_err();
-    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
-    assert_eq!(store.get_fuel()?, 0);
+    // Startup may copy a page-aligned image; its fuel is separate from lifting.
+    for cow in [false, true] {
+        assert_ne!(size_of::<CompactRecord>(), size_of::<PaddedRecord>());
+        let mut config = config();
+        config.memory_init_cow(cow);
+        config
+            .consume_fuel(true)
+            .consume_lifting_fuel(Some(LiftingPrices {
+                string_byte: 2,
+                lift_value: 3,
+                metadata_byte: 7,
+            }));
+        let engine = Engine::new(&config)?;
+        let component = Component::new(
+            &engine,
+            r#"(component
+            (type $r' (record (field "value" u8)))
+            (export $r "r" (type $r'))
+            (core module $m
+                (memory (export "memory") 1)
+                (data (i32.const 0) "\10\00\00\00")
+                (func (export "run") (param $length i32) (result i32)
+                    (i32.store (i32.const 4) (local.get $length))
+                    (i32.const 0)))
+            (core instance $i (instantiate $m))
+            (func (export "run") (param "length" u32) (result (list $r))
+                (canon lift (core func $i "run") (memory (core memory $i "memory")))))"#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        store.set_fuel(u64::MAX)?;
+        store.set_hostcall_fuel(0);
+        store.set_hostcall_fuel_enabled(false);
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        store.set_fuel(10_000)?;
+        let compact =
+            instance.get_typed_func::<(u32,), (Vec<CompactRecord>,)>(&mut store, "run")?;
+        let padded = instance.get_typed_func::<(u32,), (Vec<PaddedRecord>,)>(&mut store, "run")?;
+        compact.call(&mut store, (0,))?;
+        let empty_call_cost = 10_000 - store.get_fuel()?;
+        store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
+        assert_eq!(compact.call(&mut store, (1,))?.0[0].value, 0);
+        assert_eq!(store.get_fuel()?, 0);
+        store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
+        assert_eq!(padded.call(&mut store, (1,))?.0[0].value, 0);
+        assert_eq!(store.get_fuel()?, 0);
+        // Typed and dynamic bindings share the record/scalar and name tariff.
+        store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7)?;
+        let mut result = [Val::Bool(false)];
+        compact
+            .func()
+            .call(&mut store, &[Val::U32(1)], &mut result)?;
+        assert_eq!(store.get_fuel()?, 0);
+        store.set_fuel(empty_call_cost + 2 * 3 + 6 * 7 - 1)?;
+        let error = padded.call(&mut store, (1,)).unwrap_err();
+        assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+        assert_eq!(store.get_fuel()?, 0);
+    }
     Ok(())
 }
 
@@ -816,57 +822,61 @@ fn lifting_price_overflow_exhausts_store_fuel() -> Result<()> {
 
 #[test]
 fn nested_strings_charge_structure_and_bytes_on_success_and_failure() -> Result<()> {
-    for dynamic in [false, true] {
-        for malformed in [false, true] {
-            let mut config = config();
-            config
-                .consume_fuel(true)
-                .consume_lifting_fuel(Some(LiftingPrices {
-                    string_byte: 2,
-                    lift_value: 3,
-                    metadata_byte: 7,
-                }));
-            let engine = Engine::new(&config)?;
-            let wat = r#"(component
-                (core module $m
-                    (memory (export "memory") 1)
-                    (data (i32.const 0) "\10\00\00\00")
-                    (data (i32.const 16) "\20\00\00\00\03\00\00\00\23\00\00\00\04\00\00\00")
-                    (data (i32.const 32) "abcdefg")
-                    (func (export "run") (param $length i32) (result i32)
-                        (i32.store (i32.const 4) (local.get $length))
-                        (i32.const 0)))
-                (core instance $i (instantiate $m))
-                (func (export "run") (param "length" u32) (result (list string))
-                    (canon lift (core func $i "run") (memory (core memory $i "memory")))))"#;
-            let wat = if malformed {
-                wat.replace("abcdefg", r"abc\ffefg")
-            } else {
-                wat.to_owned()
-            };
-            let component = Component::new(&engine, wat)?;
-            let mut store = Store::new(&engine, ());
-            store.set_fuel(10_000)?;
-            store.set_hostcall_fuel_enabled(false);
-            store.set_hostcall_fuel(0);
-            let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-            let run = instance.get_typed_func::<(u32,), (Vec<String>,)>(&mut store, "run")?;
-            run.call(&mut store, (0,))?;
-            let empty_call_cost = 10_000 - store.get_fuel()?;
-            let charge = 2 * 3 + 7 * 2;
-            store.set_fuel(empty_call_cost + charge + 11)?;
-            let outcome = if dynamic {
-                run.func()
-                    .call(&mut store, &[Val::U32(2)], &mut [Val::Bool(false)])
-            } else {
-                run.call(&mut store, (2,)).map(|_| ())
-            };
-            if malformed {
-                assert!(outcome.unwrap_err().downcast_ref::<Utf8Error>().is_some());
-            } else {
-                outcome?;
+    for cow in [false, true] {
+        for dynamic in [false, true] {
+            for malformed in [false, true] {
+                let mut config = config();
+                config.memory_init_cow(cow);
+                config
+                    .consume_fuel(true)
+                    .consume_lifting_fuel(Some(LiftingPrices {
+                        string_byte: 2,
+                        lift_value: 3,
+                        metadata_byte: 7,
+                    }));
+                let engine = Engine::new(&config)?;
+                let wat = r#"(component
+                    (core module $m
+                        (memory (export "memory") 1)
+                        (data (i32.const 0) "\10\00\00\00")
+                        (data (i32.const 16) "\20\00\00\00\03\00\00\00\23\00\00\00\04\00\00\00")
+                        (data (i32.const 32) "abcdefg")
+                        (func (export "run") (param $length i32) (result i32)
+                            (i32.store (i32.const 4) (local.get $length))
+                            (i32.const 0)))
+                    (core instance $i (instantiate $m))
+                    (func (export "run") (param "length" u32) (result (list string))
+                        (canon lift (core func $i "run") (memory (core memory $i "memory")))))"#;
+                let wat = if malformed {
+                    wat.replace("abcdefg", r"abc\ffefg")
+                } else {
+                    wat.to_owned()
+                };
+                let component = Component::new(&engine, wat)?;
+                let mut store = Store::new(&engine, ());
+                store.set_fuel(u64::MAX)?;
+                store.set_hostcall_fuel_enabled(false);
+                store.set_hostcall_fuel(0);
+                let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+                store.set_fuel(10_000)?;
+                let run = instance.get_typed_func::<(u32,), (Vec<String>,)>(&mut store, "run")?;
+                run.call(&mut store, (0,))?;
+                let empty_call_cost = 10_000 - store.get_fuel()?;
+                let charge = 2 * 3 + 7 * 2;
+                store.set_fuel(empty_call_cost + charge + 11)?;
+                let outcome = if dynamic {
+                    run.func()
+                        .call(&mut store, &[Val::U32(2)], &mut [Val::Bool(false)])
+                } else {
+                    run.call(&mut store, (2,)).map(|_| ())
+                };
+                if malformed {
+                    assert!(outcome.unwrap_err().downcast_ref::<Utf8Error>().is_some());
+                } else {
+                    outcome?;
+                }
+                assert_eq!(store.get_fuel()?, 11);
             }
-            assert_eq!(store.get_fuel()?, 11);
         }
     }
     Ok(())
@@ -874,44 +884,48 @@ fn nested_strings_charge_structure_and_bytes_on_success_and_failure() -> Result<
 
 #[test]
 fn string_prices_use_guest_encoded_bytes() -> Result<()> {
-    for (encoding, data, length, bytes) in [
-        ("utf8", r"\c3\a9", 2, 2),
-        ("utf16", r"\e9\00", 1, 2),
-        ("latin1+utf16", r"\e9", 1, 1),
-        ("latin1+utf16", r"\e9\00", 0x8000_0001_u32, 2),
-    ] {
-        let mut config = config();
-        let mut table = prices(0);
-        table.string_byte = 3;
-        config.consume_fuel(true).consume_lifting_fuel(Some(table));
-        let engine = Engine::new(&config)?;
-        let component = Component::new(
-            &engine,
-            format!(
-                r#"(component
-            (core module $m
-                (memory (export "memory") 1)
-                (data (i32.const 0) "\08\00\00\00")
-                (data (i32.const 8) "{data}")
-                (func (export "run") (param $length i32) (result i32)
-                    (i32.store (i32.const 4) (local.get $length))
-                    (i32.const 0)))
-            (core instance $i (instantiate $m))
-            (func (export "run") (param "length" u32) (result string)
-                (canon lift (core func $i "run") (memory (core memory $i "memory"))
-                    string-encoding={encoding})))"#
-            ),
-        )?;
-        let mut store = Store::new(&engine, ());
-        store.set_fuel(10_000)?;
-        store.set_hostcall_fuel_enabled(false);
-        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-        let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
-        run.call(&mut store, (0,))?;
-        let empty_call_cost = 10_000 - store.get_fuel()?;
-        store.set_fuel(empty_call_cost + bytes * 3)?;
-        assert_eq!(run.call(&mut store, (length,))?.0, "é");
-        assert_eq!(store.get_fuel()?, 0);
+    for cow in [false, true] {
+        for (encoding, data, length, bytes) in [
+            ("utf8", r"\c3\a9", 2, 2),
+            ("utf16", r"\e9\00", 1, 2),
+            ("latin1+utf16", r"\e9", 1, 1),
+            ("latin1+utf16", r"\e9\00", 0x8000_0001_u32, 2),
+        ] {
+            let mut config = config();
+            config.memory_init_cow(cow);
+            let mut table = prices(0);
+            table.string_byte = 3;
+            config.consume_fuel(true).consume_lifting_fuel(Some(table));
+            let engine = Engine::new(&config)?;
+            let component = Component::new(
+                &engine,
+                format!(
+                    r#"(component
+                (core module $m
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "\08\00\00\00")
+                    (data (i32.const 8) "{data}")
+                    (func (export "run") (param $length i32) (result i32)
+                        (i32.store (i32.const 4) (local.get $length))
+                        (i32.const 0)))
+                (core instance $i (instantiate $m))
+                (func (export "run") (param "length" u32) (result string)
+                    (canon lift (core func $i "run") (memory (core memory $i "memory"))
+                        string-encoding={encoding})))"#
+                ),
+            )?;
+            let mut store = Store::new(&engine, ());
+            store.set_fuel(u64::MAX)?;
+            store.set_hostcall_fuel_enabled(false);
+            let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+            store.set_fuel(10_000)?;
+            let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+            run.call(&mut store, (0,))?;
+            let empty_call_cost = 10_000 - store.get_fuel()?;
+            store.set_fuel(empty_call_cost + bytes * 3)?;
+            assert_eq!(run.call(&mut store, (length,))?.0, "é");
+            assert_eq!(store.get_fuel()?, 0);
+        }
     }
     Ok(())
 }
