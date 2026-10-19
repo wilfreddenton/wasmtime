@@ -4,19 +4,20 @@ use crate::component::concurrent::ConcurrentState;
 use crate::component::matching::InstanceType;
 use crate::component::resources::{HostResourceData, HostResourceIndex, HostResourceTables};
 use crate::component::store::ComponentTaskState;
+use crate::component::work::WorkWeights;
 use crate::component::{Instance, ResourceType, RuntimeInstance};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
     ComponentInstance, CurrentScope, HandleCounter, HandleTable, ResourceTables,
 };
 use crate::runtime::vm::{UncaughtException, VMFuncRef};
-use crate::store::{StoreId, StoreOpaque};
+use crate::store::{StoreFuel, StoreId, StoreOpaque};
 use alloc::sync::Arc;
 use core::fmt;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use wasmtime_environ::component::{
-    CanonicalOptions, CanonicalOptionsDataModel, ComponentTypes, OptionsIndex,
+    CanonicalOptions, CanonicalOptionsDataModel, ComponentTypes, InterfaceType, OptionsIndex,
     TypeResourceTableIndex,
 };
 
@@ -359,35 +360,50 @@ pub struct LiftContext<'a> {
 
     task_state: &'a mut ComponentTaskState,
 
-    /// Remaining fuel for this hostcall/lift operation.
-    ///
-    /// This is decremented for strings/lists, for example, to cap the size of
-    /// data the host allocates on behalf of the guest.
-    hostcall_fuel: usize,
+    /// Remaining native allocation allowance for this lifting context, or
+    /// `None` when disabled. This is independent of Store fuel.
+    hostcall_fuel: Option<usize>,
+    lifting: Option<(StoreFuel<'a>, &'a WorkWeights)>,
 }
 
 #[doc(hidden)]
 impl<'a> LiftContext<'a> {
-    /// Creates a new lifting context given the provided context.
+    /// Creates a context honoring the native allowance setting, without
+    /// portable fuel charges.
     #[inline]
     pub fn new(
         store: &'a mut StoreOpaque,
         options: OptionsIndex,
         instance_handle: Instance,
     ) -> Result<LiftContext<'a>> {
+        Self::new_impl(store, options, instance_handle, false)
+    }
+
+    /// Enables configured Store fuel charges at a supported lifting entry point.
+    pub(crate) fn new_metered(
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        instance_handle: Instance,
+    ) -> Result<LiftContext<'a>> {
+        Self::new_impl(store, options, instance_handle, true)
+    }
+
+    fn new_impl(
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        instance_handle: Instance,
+        metered: bool,
+    ) -> Result<LiftContext<'a>> {
         let store_id = store.id();
-        let hostcall_fuel = store.hostcall_fuel();
+        let hostcall_fuel = store.hostcall_fuel_enabled().then(|| store.hostcall_fuel());
         let current_scope = store.current_scope()?;
-        // From `&mut StoreOpaque` provided the goal here is to project out
-        // three different disjoint fields owned by the store: memory,
-        // `CallContexts`, and `HandleTable`. There's no native API for that
-        // so it's hacked around a bit. This unsafe pointer cast could be fixed
-        // with more methods in more places, but it doesn't seem worth doing it
-        // at this time.
+        // SAFETY: guest linear memory is disjoint from the component state and
+        // fuel counters borrowed below. The context retains the Store borrow
+        // and cannot execute guest code or grow the borrowed memory.
         let memory =
             instance_handle.options_memory(unsafe { &*(store as *const StoreOpaque) }, options);
-        let (task_state, host_table, handle_counter, host_resource_data, instance) =
-            store.lift_context_parts(instance_handle);
+        let (task_state, host_table, handle_counter, host_resource_data, instance, store_fuel) =
+            store.lift_context_parts_with_fuel(instance_handle);
         let (component, instance) = instance.component_and_self();
 
         Ok(LiftContext {
@@ -403,6 +419,12 @@ impl<'a> LiftContext<'a> {
             handle_counter,
             host_resource_data,
             hostcall_fuel,
+            lifting: store_fuel.filter(|_| metered).map(|fuel| {
+                (
+                    fuel,
+                    component.work_weights().expect("lifting weights missing"),
+                )
+            }),
         })
     }
 
@@ -529,27 +551,40 @@ impl<'a> LiftContext<'a> {
         self.resource_tables().validate_scope_exit()
     }
 
-    /// Consumes `amt` units of fuel, typically a number of bytes, from this
-    /// context.
-    ///
-    /// Returns an error if the fuel is exhausted which will cause a trap in the
-    /// guest. Note that this is distinct from Wasm's fuel, this is just for
-    /// keeping track of data flowing from the guest to the host.
-    pub fn consume_fuel(&mut self, amt: usize) -> Result<()> {
-        match self.hostcall_fuel.checked_sub(amt) {
-            Some(new) => self.hostcall_fuel = new,
-            None => bail!(HostcallFuelExhausted),
+    pub(crate) fn consume_structure(&mut self, ty: InterfaceType, count: usize) -> Result<()> {
+        if let Some((fuel, weights)) = &mut self.lifting {
+            let weight = weights.get(ty);
+            let prices = fuel.prices;
+            fuel.consume_quantity(count as u64, weight.nodes, prices.lift_value)?;
+            fuel.consume_quantity(count as u64, weight.metadata, prices.metadata_byte)?;
         }
         Ok(())
     }
 
-    /// Same as [`Self::consume_fuel`], but safely multiplies `len` and `size`
-    /// together before calling that.
-    pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
-        match len.checked_mul(size) {
-            Some(bytes) => self.consume_fuel(bytes),
-            None => bail!(HostcallFuelExhausted),
+    pub(crate) fn consume_string(&mut self, bytes: usize) -> Result<()> {
+        self.consume_fuel(bytes)?;
+        if let Some((fuel, _)) = &mut self.lifting {
+            fuel.consume_quantity(bytes as u64, Some(1), fuel.prices.string_byte)?;
         }
+        Ok(())
+    }
+
+    /// Consumes bytes from the native host allocation allowance when enabled.
+    /// This allowance is independent of Wasm fuel and portable lifting charges.
+    pub fn consume_fuel(&mut self, bytes: usize) -> Result<()> {
+        self.consume_fuel_array(bytes, 1)
+    }
+
+    /// Same as [`Self::consume_fuel`], with checked multiplication of `len` and
+    /// `size`. Disabling the allowance also skips this multiplication.
+    pub fn consume_fuel_array(&mut self, len: usize, size: usize) -> Result<()> {
+        if let Some(remaining) = &mut self.hostcall_fuel {
+            *remaining = len
+                .checked_mul(size)
+                .and_then(|amount| remaining.checked_sub(amount))
+                .ok_or(HostcallFuelExhausted)?;
+        }
+        Ok(())
     }
 }
 

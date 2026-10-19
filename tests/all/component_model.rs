@@ -14,6 +14,7 @@ mod bindgen;
 mod call_hook;
 mod dynamic;
 mod fixed_length_list;
+mod fuel;
 mod func;
 mod handle_table_limit;
 mod import;
@@ -28,6 +29,7 @@ mod stream_contract;
 mod stream_sync_dropped;
 mod strings;
 mod sync_call_inline;
+mod work_metering;
 
 #[derive(Copy, Clone)]
 enum ApiStyle {

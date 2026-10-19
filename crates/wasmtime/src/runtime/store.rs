@@ -76,6 +76,8 @@
 //! contents of `StoreOpaque`. This is an invariant that we, as the authors of
 //! `wasmtime`, must uphold for the public interface to be safe.
 
+#[cfg(feature = "component-model")]
+use crate::component::ComponentStoreData;
 use crate::error::OutOfMemory;
 #[cfg(feature = "async")]
 use crate::fiber;
@@ -95,6 +97,8 @@ use crate::trampoline::VMHostGlobalContext;
 use crate::{BreakpointState, DebugHandler, FrameDataCache};
 use crate::{Engine, Module, Val, ValRaw, module::ModuleRegistry};
 use crate::{Global, Instance, Table};
+#[cfg(feature = "component-model")]
+use crate::{LiftingPrices, Trap};
 use core::convert::Infallible;
 use core::fmt;
 #[cfg(any(feature = "async", feature = "gc"))]
@@ -993,7 +997,8 @@ impl<T> Store<T> {
         self.inner.get_fuel()
     }
 
-    /// Set the fuel to this [`Store`] for wasm to consume while executing.
+    /// Set the fuel available for Wasm execution. Configured component lifting
+    /// consumes this same budget when enabled.
     ///
     /// For this method to work fuel consumption must be enabled via
     /// [`Config::consume_fuel`](crate::Config::consume_fuel). By default a
@@ -1043,6 +1048,8 @@ impl<T> Store<T> {
     ///
     /// The `interval` parameter indicates how much fuel should be
     /// consumed between yields of an async future. When fuel runs out wasm will trap.
+    /// Fuel consumed by component lifting counts toward this interval, but
+    /// lifting does not itself yield.
     ///
     /// For limitations related to consumption of fuel and when yield points are
     /// injected, see the discussion in
@@ -1526,8 +1533,71 @@ fn set_fuel(
     *injected_fuel = -(injected as i64);
 }
 
+// Borrow fuel separately so lifting can also borrow component state.
+#[cfg(feature = "component-model")]
+pub(crate) struct StoreFuel<'a> {
+    injected: &'a mut i64,
+    reserve: &'a mut u64,
+    pub(crate) prices: LiftingPrices,
+}
+
+#[cfg(feature = "component-model")]
+impl StoreFuel<'_> {
+    pub(crate) fn consume_quantity(
+        &mut self,
+        count: u64,
+        units: Option<u64>,
+        price: u64,
+    ) -> Result<()> {
+        let remaining = get_fuel(*self.injected, *self.reserve);
+        let amount = if price == 0 || count == 0 || units == Some(0) {
+            Some(0)
+        } else {
+            units
+                .and_then(|units| count.checked_mul(units))
+                .and_then(|n| n.checked_mul(price))
+        };
+        let amount = match amount {
+            Some(amount) if amount <= remaining => amount,
+            _ => {
+                *self.injected = 0;
+                *self.reserve = 0;
+                return Err(Trap::OutOfFuel.into());
+            }
+        };
+
+        let active = if *self.injected < 0 {
+            self.injected.unsigned_abs()
+        } else {
+            0
+        };
+
+        // Charge the active batch first so lifting counts toward the next guest
+        // yield. Refilling it here would restart the yield interval.
+        let active_remaining = active.saturating_sub(amount);
+        let total_remaining = remaining - amount;
+
+        *self.injected = -(active_remaining as i64);
+        *self.reserve = total_remaining - active_remaining;
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 impl StoreOpaque {
+    #[cfg(feature = "component-model")]
+    pub(crate) fn component_data_and_fuel_mut(
+        &mut self,
+    ) -> (&mut ComponentStoreData, Option<StoreFuel<'_>>) {
+        let prices = self.engine.config().consume_lifting_fuel;
+        let fuel = prices.map(|prices| StoreFuel {
+            injected: self.vm_store_context.fuel_consumed.get_mut(),
+            reserve: &mut self.fuel_reserve,
+            prices,
+        });
+        (&mut self.store_data.components, fuel)
+    }
+
     pub fn id(&self) -> StoreId {
         self.store_data.id()
     }
@@ -2618,6 +2688,154 @@ mod tests {
                 fuel,
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "component-model")]
+    fn component_overflowed_weights_preserve_zero_factors() -> Result<()> {
+        for (count, price, exhausted) in [(1, 1, true), (0, 1, false), (1, 0, false)] {
+            let mut tank = FuelTank::new();
+            tank.set_fuel(100);
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
+                prices: TEST_LIFTING_PRICES,
+            }
+            .consume_quantity(count, None, price);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+                assert_eq!(tank.get_fuel(), 0);
+            } else {
+                result?;
+                assert_eq!(tank.get_fuel(), 100);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "component-model")]
+    const TEST_LIFTING_PRICES: LiftingPrices = LiftingPrices {
+        string_byte: 1,
+        lift_value: 1,
+        metadata_byte: 1,
+    };
+
+    #[test]
+    #[cfg(feature = "component-model")]
+    fn component_fuel_preserves_balance_and_yield_boundary() -> Result<()> {
+        let max = i64::MAX as u64;
+        for (injected, reserve, amount, expected, exhausted) in [
+            (0, 0, 0, (0, 0), false),
+            (0, 0, 1, (0, 0), true),
+            (-10, 15, 0, (-10, 15), false),
+            (-10, 15, 3, (-7, 15), false),
+            (-10, 15, 10, (0, 15), false),
+            (-10, 15, 11, (0, 14), false),
+            (-10, 15, 25, (0, 0), false),
+            (-10, 15, 26, (0, 0), true),
+            (0, 15, 3, (0, 12), false),
+            (-i64::MAX, 0, 1, (-i64::MAX + 1, 0), false),
+            (-i64::MAX, 0, max, (0, 0), false),
+            (-i64::MAX, 0, max + 1, (0, 0), true),
+            (-i64::MAX, 1, max + 1, (0, 0), false),
+            (-i64::MAX, u64::MAX - max, max, (0, u64::MAX - max), false),
+            (-i64::MAX, u64::MAX - max, max + 1, (0, max), false),
+            (-i64::MAX, u64::MAX - max, u64::MAX, (0, 0), false),
+        ] {
+            let mut tank = FuelTank {
+                consumed_fuel: injected,
+                reserve_fuel: reserve,
+                yield_interval: None,
+            };
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
+                prices: TEST_LIFTING_PRICES,
+            }
+            .consume_quantity(amount, Some(1), 1);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+            } else {
+                result?;
+            }
+            assert_eq!(
+                (tank.consumed_fuel, tank.reserve_fuel),
+                expected,
+                "initial counter={injected}, reserve={reserve}, charge={amount}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "component-model")]
+    fn component_fuel_accounts_for_instruction_overrun() -> Result<()> {
+        for (amount, expected_reserve, exhausted) in [
+            (0, 38, false),
+            (3, 35, false),
+            (38, 0, false),
+            (39, 0, true),
+        ] {
+            let mut tank = FuelTank::new();
+            tank.consumed_fuel = 4;
+            tank.reserve_fuel = 42;
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
+                prices: TEST_LIFTING_PRICES,
+            }
+            .consume_quantity(amount, Some(1), 1);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+            } else {
+                result?;
+            }
+            assert_eq!(tank.consumed_fuel, 0);
+            assert_eq!(tank.reserve_fuel, expected_reserve);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "component-model")]
+    fn component_fuel_cost_multiplication() -> Result<()> {
+        for (count, units, price, expected_fuel, exhausted) in [
+            (u64::MAX, u64::MAX, 0, u64::MAX, false),
+            (0, u64::MAX, u64::MAX, u64::MAX, false),
+            (u64::MAX, 0, u64::MAX, u64::MAX, false),
+            (u64::MAX / 2, 1, 2, 1, false),
+            (u64::MAX / 2 + 1, 1, 2, 0, true),
+            (u64::MAX / 2 + 1, 2, 1, 0, true),
+            (u64::MAX / 2, 2, 2, 0, true),
+        ] {
+            let mut tank = FuelTank::new();
+            tank.set_fuel(u64::MAX);
+            let result = StoreFuel {
+                injected: &mut tank.consumed_fuel,
+                reserve: &mut tank.reserve_fuel,
+                prices: TEST_LIFTING_PRICES,
+            }
+            .consume_quantity(count, Some(units), price);
+            if exhausted {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<Trap>(),
+                    Some(&Trap::OutOfFuel)
+                );
+            } else {
+                result?;
+            }
+            assert_eq!(tank.get_fuel(), expected_fuel);
+        }
+        Ok(())
     }
 
     #[test]

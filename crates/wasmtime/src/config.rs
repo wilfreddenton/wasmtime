@@ -36,6 +36,64 @@ pub use wasmtime_cache::{Cache, CacheConfig};
 pub use wasmtime_environ::CacheStore;
 pub use wasmtime_environ::Inlining;
 
+/// Store fuel prices for guest-to-host component lifting, configured with
+/// [`Config::consume_lifting_fuel`].
+///
+/// Quantities depend on component types and canonical string encodings, never
+/// native Rust layouts. Prices cover built-in and derived bindings for guest
+/// arguments to host functions, guest function results, and deferred value
+/// access, plus the debug string supplied to `error-context.new`. These are
+/// logical admission units, not measured CPU or memory use.
+///
+/// Fixed structure is admitted before traversal. Variable collection contents
+/// and string bytes are admitted at their own checkpoints. Variants, options,
+/// and results reserve the maximum static node and metadata weights across
+/// their payloads, even when the selected case has no payload. These two
+/// maxima can come from different cases.
+/// Earlier deductions remain consumed when a later check or conversion fails.
+/// Typed and dynamic bindings share successful structural charges; malformed
+/// values can fail at different checkpoints and retain different charges.
+/// Metering applies to synchronous and asynchronous function calls. Stream and
+/// future payload transfers, lowering, host result staging, and guest-to-guest
+/// adapter conversion are outside this meter's scope.
+/// Stream/future handles passed as function arguments or results are still
+/// charged as values. Deferred value access is a separate metered operation,
+/// regardless of how the value was obtained.
+/// Custom unsafe bindings and application host code remain the embedder's
+/// responsibility, including processing raw borrowed byte views.
+/// This is not a complete component execution budget or a memory limit.
+///
+/// Zero prices opt out of a category, including quantities that overflow.
+/// The native allocation allowance remains independent and uses Rust layouts
+/// when enabled. It can be disabled with `Store::set_hostcall_fuel_enabled`.
+/// Disable it when accounting must be independent of native layouts on
+/// failure paths as well as successful lifts.
+///
+/// Charging units and behavior are part of this API's compatibility contract;
+/// changes require a breaking release. Embedders requiring historical replay
+/// should pin the runtime and prices and validate exact costs when upgrading.
+#[cfg(feature = "component-model")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiftingPrices {
+    /// Per admitted value node when lifting. Records, tuples and fixed arrays
+    /// include their descendants; variable containers charge elements separately.
+    /// Variants, options and results reserve the largest static payload, even
+    /// when another case is selected. Function parameter/result tuples count
+    /// when lifted. Repeated lazy list access admits the requested
+    /// elements again, including unused elements of a dropped iterator.
+    /// A handle node covers runtime transfer bookkeeping; application
+    /// and guest destructor execution retain their separate accounting.
+    pub lift_value: u64,
+    /// Per source byte in the guest encoding for lifted strings, including
+    /// bounded validation, decoding and copying. UTF-16 counts two bytes per
+    /// code unit; UTF-8 and Latin-1 count their encoded bytes. Lazy string
+    /// construction and each metered decoding call are charged separately.
+    pub string_byte: u64,
+    /// Per declared metadata name byte plus one per name, including unselected
+    /// cases/flags in the admitted lifted type.
+    pub metadata_byte: u64,
+}
+
 pub(crate) const DEFAULT_WASM_BACKTRACE_MAX_FRAMES: NonZeroUsize = NonZeroUsize::new(20).unwrap();
 
 /// Represents the module instance allocation strategy to use.
@@ -164,6 +222,8 @@ pub struct Config {
     collector: Collector,
     profiling_strategy: ProfilingStrategy,
     tunables: ConfigTunables,
+    #[cfg(feature = "component-model")]
+    pub(crate) consume_lifting_fuel: Option<LiftingPrices>,
 
     #[cfg(feature = "cache")]
     pub(crate) cache: Option<Cache>,
@@ -271,6 +331,8 @@ impl Config {
     pub fn new() -> Self {
         let mut ret = Self {
             tunables: ConfigTunables::default(),
+            #[cfg(feature = "component-model")]
+            consume_lifting_fuel: None,
             #[cfg(any(feature = "cranelift", feature = "winch"))]
             compiler_config: Some(CompilerConfig::default()),
             target: None,
@@ -642,6 +704,26 @@ impl Config {
     /// [`Store`]: crate::Store
     pub fn consume_fuel(&mut self, enable: bool) -> &mut Self {
         self.tunables.consume_fuel = Some(enable);
+        self
+    }
+
+    /// Configures fuel accounting for component function lifting and deferred access.
+    ///
+    /// `None` (the default) leaves lifting unmetered. `Some(prices)` enables
+    /// the tariff described by [`LiftingPrices`]. With metering enabled,
+    /// `WasmStr::to_str` returns an error: use `WasmStr::to_str_metered` with
+    /// mutable Store access to charge each decode. This requirement also applies
+    /// when all configured prices are zero.
+    ///
+    /// Requires [`Self::consume_fuel`]. Deductions precede admitted work, share
+    /// the Store instruction budget, and are retained on failure. Overflow or
+    /// insufficient fuel exhausts the budget and traps. This does not yield
+    /// within native work, impose a memory limit, or replace host operation costs.
+    /// The existing native allocation allowance remains independent.
+    /// Compilation and instantiation are outside the lifting tariff.
+    #[cfg(feature = "component-model")]
+    pub fn consume_lifting_fuel(&mut self, prices: Option<LiftingPrices>) -> &mut Self {
+        self.consume_lifting_fuel = prices;
         self
     }
 
@@ -2793,6 +2875,11 @@ impl Config {
 
         self.tunables.configure(&mut tunables);
 
+        #[cfg(feature = "component-model")]
+        if self.consume_lifting_fuel.is_some() && !tunables.consume_fuel {
+            bail!("consume_lifting_fuel requires consume_fuel to be enabled");
+        }
+
         // If no GC heap tunables are explicitly configured, copy the memory
         // tunables' configured values so that GC heaps default to the same
         // configuration as linear memories.
@@ -3582,6 +3669,8 @@ impl fmt::Debug for Config {
         }
 
         f.field("parallel_compilation", &self.parallel_compilation);
+        #[cfg(feature = "component-model")]
+        f.field("consume_lifting_fuel", &self.consume_lifting_fuel);
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
             f.field("compiler_config", &self.compiler_config);
@@ -5140,6 +5229,12 @@ impl Engine {
     /// Returns the configured [`Config::consume_fuel`] value.
     pub fn get_consume_fuel(&self) -> bool {
         self.tunables().consume_fuel
+    }
+
+    /// Returns the configured [`Config::consume_lifting_fuel`] prices.
+    #[cfg(feature = "component-model")]
+    pub fn get_consume_lifting_fuel(&self) -> Option<LiftingPrices> {
+        self.config().consume_lifting_fuel
     }
 
     /// Returns the configured [`Config::max_wasm_stack`] value.

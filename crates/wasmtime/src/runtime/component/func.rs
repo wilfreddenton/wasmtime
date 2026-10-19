@@ -703,8 +703,9 @@ impl Func {
         ty: TypeFuncIndex,
         lift: impl FnOnce(&mut LiftContext, InterfaceType) -> Result<R>,
     ) -> Result<R> {
-        let mut cx = LiftContext::new(store, options, instance)?;
+        let mut cx = LiftContext::new_metered(store, options, instance)?;
         let ty = InterfaceType::Tuple(cx.types[ty].results);
+        cx.consume_structure(ty, 1)?;
         lift(&mut cx, ty)
     }
 }

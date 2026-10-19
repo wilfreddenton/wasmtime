@@ -1,7 +1,7 @@
 use crate::component::Instance;
 use crate::component::func::{Func, LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
-use crate::component::storage::{storage_as_slice, storage_as_slice_mut};
+use crate::component::storage::{slice_to_storage_mut, storage_as_slice, storage_as_slice_mut};
 use crate::hash_map::HashMap;
 use crate::prelude::*;
 use crate::{AsContextMut, StoreContext, StoreContextMut, ValRaw};
@@ -193,8 +193,6 @@ where
         dst: &mut [MaybeUninit<ValRaw>],
         params: &Params,
     ) -> Result<()> {
-        use crate::component::storage::slice_to_storage_mut;
-
         if Params::flatten_count() <= MAX_FLAT_PARAMS {
             // SAFETY: the safety of `slice_to_storage_mut` relies on
             // `Params::Lower` being represented by a sequence of
@@ -1504,6 +1502,12 @@ fn lower_string<T>(cx: &mut LowerContext<'_, T>, string: &str) -> Result<(usize,
 /// does not represent a valid string (e.g. valid utf-8). Validation happens
 /// when [`WasmStr::to_str`] is called.
 ///
+/// Construction charges the guest-encoded byte length against the enabled
+/// native allowance, and against configured lifting fuel at metered entry
+/// points such as function arguments and results. When lifting fuel is enabled,
+/// decoding requires [`WasmStr::to_str_metered`] so each access can debit fuel,
+/// including for values obtained from otherwise unmetered transfers.
+///
 /// Also note that this type does not implement [`Lower`], it only implements
 /// [`Lift`].
 pub struct WasmStr {
@@ -1531,7 +1535,7 @@ impl WasmStr {
             bail!("string pointer not aligned to {align}");
         }
         match byte_len.and_then(|len| ptr.checked_add(len)) {
-            Some(n) if n <= cx.memory().len() => cx.consume_fuel(n - ptr)?,
+            Some(n) if n <= cx.memory().len() => cx.consume_string(n - ptr)?,
             _ => bail!("string pointer/length out of bounds of memory"),
         }
         Ok(WasmStr {
@@ -1553,7 +1557,8 @@ impl WasmStr {
     /// # Errors
     ///
     /// Returns an error if the string wasn't encoded correctly (e.g. invalid
-    /// utf-8).
+    /// utf-8), or if lifting fuel is enabled. Use [`Self::to_str_metered`] with
+    /// mutable Store access when lifting fuel is enabled.
     ///
     /// # Panics
     ///
@@ -1570,7 +1575,35 @@ impl WasmStr {
         let store = store.into().0;
         let memory = self.instance.options_memory(store, self.options);
         let encoding = self.instance.options(store, self.options).string_encoding;
+        ensure!(
+            store.engine().config().consume_lifting_fuel.is_none(),
+            "lifting fuel requires WasmStr::to_str_metered with mutable Store access"
+        );
         self.to_str_from_memory(encoding, memory)
+    }
+
+    /// Decodes the string while charging configured lifting fuel.
+    ///
+    /// Each call admits the encoded input against a fresh native allowance and
+    /// the configured string-byte price before validation or transcoding.
+    /// Charges from construction remain consumed, including on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string is invalid or either enabled budget is
+    /// insufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the string did not originate from the provided `store`.
+    pub fn to_str_metered<'a, T: 'static>(
+        &self,
+        store: impl Into<StoreContextMut<'a, T>>,
+    ) -> Result<Cow<'a, str>> {
+        let store = store.into().0;
+        let mut cx = LiftContext::new_metered(store, self.options, self.instance)?;
+        let value = Self::new(self.ptr, self.len, &mut cx)?;
+        value.to_str_from_memory(cx.options().string_encoding, cx.memory())
     }
 
     pub(crate) fn to_str_from_memory<'a>(
@@ -1755,7 +1788,20 @@ where
 ///
 /// Note that this type represents only a valid range of bytes for the list
 /// itself, it does not represent validity of the elements themselves and that's
-/// performed when they're iterated.
+/// performed when they're iterated. Construction charges the list's native
+/// storage against the enabled allocation allowance. At metered entry points
+/// such as function arguments and results, it also charges element shapes
+/// against configured lifting fuel, even though it does not copy the elements.
+///
+/// Lifting elements through [`Self::get`] or [`Self::iter`] can incur additional
+/// charges for nested values and fail if an enabled allowance is insufficient.
+/// Each `get` or `iter` call starts with a fresh native allowance; an iterator
+/// shares that allowance across its elements. Store fuel is shared across all
+/// these operations and is not reset. Repeated access repeats nested charges.
+/// Configured lifting fuel admits each accessed element's static shape on
+/// `get`, and the whole requested range on `iter`, even if the iterator is
+/// dropped early. These accesses are metered regardless of how the list was
+/// obtained.
 ///
 /// Note that this type does not implement the [`Lower`] trait, only [`Lift`].
 pub struct WasmList<T> {
@@ -1784,6 +1830,7 @@ impl<T: Lift> WasmList<T> {
         if ptr % usize::try_from(T::ALIGN32)? != 0 {
             bail!("list pointer is not aligned")
         }
+        cx.consume_structure(elem, len)?;
         Ok(WasmList {
             ptr,
             len,
@@ -1802,13 +1849,12 @@ impl<T: Lift> WasmList<T> {
 
     /// Gets the `n`th element of this list.
     ///
-    /// Returns `None` if `index` is out of bounds. Returns `Some(Err(..))` if
-    /// the value couldn't be decoded (it was invalid). Returns `Some(Ok(..))`
-    /// if the value is valid.
+    /// Returns `None` if `index` is out of bounds, or `Some` containing the
+    /// result of lifting the element.
     ///
     /// # Panics
     ///
-    /// This function will panic if the string did not originally come from the
+    /// This function will panic if the list did not originally come from the
     /// `store` specified.
     //
     // TODO: given that interface values are intended to be consumed in one go
@@ -1816,10 +1862,15 @@ impl<T: Lift> WasmList<T> {
     // consumers should be validating through the iterator.
     pub fn get(&self, mut store: impl AsContextMut, index: usize) -> Option<Result<T>> {
         let store = store.as_context_mut().0;
-        let mut cx = match LiftContext::new(store, self.options, self.instance) {
+        let mut cx = match LiftContext::new_metered(store, self.options, self.instance) {
             Ok(cx) => cx,
             Err(e) => return Some(Err(e)),
         };
+        if index < self.len {
+            if let Err(e) = cx.consume_structure(self.elem, 1) {
+                return Some(Err(e));
+            }
+        }
         self.get_from_store(&mut cx, index)
     }
 
@@ -1846,7 +1897,8 @@ impl<T: Lift> WasmList<T> {
         store: impl Into<StoreContextMut<'a, U>>,
     ) -> Result<impl ExactSizeIterator<Item = Result<T>> + 'a> {
         let store = store.into().0;
-        let mut cx = LiftContext::new(store, self.options, self.instance)?;
+        let mut cx = LiftContext::new_metered(store, self.options, self.instance)?;
+        cx.consume_structure(self.elem, self.len)?;
         Ok((0..self.len).map(move |i| self.get_from_store(&mut cx, i).unwrap()))
     }
 }
@@ -1866,6 +1918,9 @@ macro_rules! raw_wasm_list_accessors {
             /// so portable processing of this slice must be aware of the host's
             /// byte-endianness. The `from_le` constructors in the Rust standard
             /// library should be suitable for converting from little-endian.
+            ///
+            /// Borrowing this view does not consume additional lifting fuel.
+            /// Embedders must account for host work that processes or copies it.
             ///
             /// # Panics
             ///
@@ -2150,8 +2205,6 @@ where
     K: Lift + Eq + Hash,
     V: Lift,
 {
-    let mut result = TryHashMap::with_capacity(len)?;
-
     match len
         .checked_mul(usize::try_from(map.entry_abi.size32)?)
         .and_then(|total| ptr.checked_add(total))
@@ -2163,6 +2216,9 @@ where
         bail!("map pointer is not aligned");
     }
 
+    cx.consume_structure(map.key, len)?;
+    cx.consume_structure(map.value, len)?;
+    let mut result = TryHashMap::with_capacity(len)?;
     for i in 0..len {
         let entry_base = ptr + (i * usize::try_from(map.entry_abi.size32)?);
 

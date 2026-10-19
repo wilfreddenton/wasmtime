@@ -446,7 +446,7 @@ where
     ) -> Result<()> {
         let entered_host_task = store.0.host_task_create()?;
 
-        let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
+        let mut lift = LiftContext::new_metered(store.0.store_opaque_mut(), options, instance)?;
         let (params, rest) = self.load_params(&mut lift, ty, MAX_FLAT_PARAMS, storage)?;
 
         let ret = self
@@ -503,7 +503,7 @@ where
 
         // Lift the parameters, either from flat storage or from linear
         // memory.
-        let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
+        let mut lift = LiftContext::new_metered(store.0.store_opaque_mut(), options, instance)?;
         let (params, rest) = self.load_params(&mut lift, ty, MAX_FLAT_ASYNC_PARAMS, storage)?;
 
         // Load/validate the return pointer, if present.
@@ -591,6 +591,7 @@ where
                 )?)
             }
         };
+        lift.consume_structure(InterfaceType::Tuple(lift.types[ty].params), 1)?;
         let params = Self::lift_params(lift, ty, src)?;
         Ok((params, &storage[param_flat_count.unwrap_or(1)..]))
     }

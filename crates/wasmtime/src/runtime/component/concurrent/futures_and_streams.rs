@@ -4378,7 +4378,8 @@ impl Instance {
         debug_msg_address: u32,
         debug_msg_len: u32,
     ) -> Result<u32> {
-        let lift_ctx = &mut LiftContext::new(store, options, self)?;
+        let lift_ctx = &mut LiftContext::new_metered(store, options, self)?;
+        lift_ctx.consume_structure(InterfaceType::String, 1)?;
         let debug_msg = String::linear_lift_from_flat(
             lift_ctx,
             InterfaceType::String,

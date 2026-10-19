@@ -1045,6 +1045,7 @@ fn load_list(cx: &mut LiftContext<'_>, ty: TypeListIndex, ptr: usize, len: usize
         bail!("list pointer is not aligned")
     }
 
+    cx.consume_structure(elem, len)?;
     Ok(Val::List(
         (0..len)
             .map(|index| {
@@ -1085,6 +1086,8 @@ fn load_map(cx: &mut LiftContext<'_>, ty: TypeMapIndex, ptr: usize, len: usize) 
     }
 
     // Load each tuple (key, value) into a Vec
+    cx.consume_structure(key_ty, len)?;
+    cx.consume_structure(value_ty, len)?;
     let mut map = Vec::with_capacity(len);
     for index in 0..len {
         let tuple_ptr = ptr + (index * tuple_size);
