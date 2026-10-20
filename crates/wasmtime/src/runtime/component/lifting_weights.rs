@@ -1,16 +1,16 @@
-//! Precomputed conservative admission weights for component lifting.
+//! Precomputed structural weights for component lifting.
 
 use crate::prelude::*;
 use wasmtime_environ::component::{ComponentTypes, InterfaceType};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct WorkWeight {
+pub(crate) struct LiftingWeight {
     // Preserve overflow as `None` so a zero price can still make it free.
     pub nodes: Option<u64>,
     pub metadata: Option<u64>,
 }
 
-impl WorkWeight {
+impl LiftingWeight {
     const ZERO: Self = Self {
         nodes: Some(0),
         metadata: Some(0),
@@ -52,24 +52,24 @@ impl WorkWeight {
     }
 }
 
-pub(crate) struct WorkWeights(TryHashMap<InterfaceType, WorkWeight>);
+pub(crate) struct LiftingWeights(TryHashMap<InterfaceType, LiftingWeight>);
 
-impl WorkWeights {
+impl LiftingWeights {
     pub fn new(types: &ComponentTypes) -> Result<Self> {
         let mut result = Self(TryHashMap::new());
-        for ty in types.work_accounting_types() {
+        for ty in types.lifting_weight_types() {
             result.compute(types, ty)?;
         }
         Ok(result)
     }
 
-    fn compute(&mut self, types: &ComponentTypes, ty: InterfaceType) -> Result<WorkWeight> {
+    fn compute(&mut self, types: &ComponentTypes, ty: InterfaceType) -> Result<LiftingWeight> {
         if let Some(weight) = self.0.get(&ty) {
             return Ok(*weight);
         }
         // Validated component types have bounded nesting. Memoization keeps
         // shared subtrees from being traversed again for each parent.
-        let mut weight = WorkWeight::LEAF;
+        let mut weight = LiftingWeight::LEAF;
         let mut name = |name: &str| {
             // Account for per-entry work as well as copying the name.
             weight.metadata = weight
@@ -101,7 +101,7 @@ impl WorkWeights {
                 for n in types[i].cases.keys() {
                     name(n);
                 }
-                let mut payload = WorkWeight::ZERO;
+                let mut payload = LiftingWeight::ZERO;
                 for t in types[i].cases.values().flatten() {
                     payload = payload.max(self.compute(types, *t)?);
                 }
@@ -111,7 +111,7 @@ impl WorkWeights {
                 weight = weight.add(self.compute(types, types[i].ty)?);
             }
             InterfaceType::Result(i) => {
-                let mut payload = WorkWeight::ZERO;
+                let mut payload = LiftingWeight::ZERO;
                 for t in [types[i].ok, types[i].err].into_iter().flatten() {
                     payload = payload.max(self.compute(types, t)?);
                 }
@@ -133,7 +133,7 @@ impl WorkWeights {
         Ok(weight)
     }
 
-    pub fn get(&self, ty: InterfaceType) -> WorkWeight {
+    pub fn get(&self, ty: InterfaceType) -> LiftingWeight {
         match ty {
             InterfaceType::Record(_)
             | InterfaceType::Tuple(_)
@@ -165,23 +165,23 @@ impl WorkWeights {
             | InterfaceType::Borrow(_)
             | InterfaceType::Future(_)
             | InterfaceType::Stream(_)
-            | InterfaceType::ErrorContext(_) => WorkWeight::LEAF,
+            | InterfaceType::ErrorContext(_) => LiftingWeight::LEAF,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WorkWeight;
+    use super::LiftingWeight;
 
     #[test]
     fn overflow_is_retained_and_empty_repetition_is_free() {
-        let large = WorkWeight::LEAF.repeat(u64::MAX);
+        let large = LiftingWeight::LEAF.repeat(u64::MAX);
         assert_eq!(large.nodes, Some(u64::MAX));
-        assert_eq!(large.add(WorkWeight::LEAF).nodes, None);
+        assert_eq!(large.add(LiftingWeight::LEAF).nodes, None);
         assert_eq!(large.repeat(2).nodes, None);
         assert_eq!(large.repeat(2).repeat(0).nodes, Some(0));
-        assert_eq!(large.repeat(2).max(WorkWeight::LEAF).nodes, None);
+        assert_eq!(large.repeat(2).max(LiftingWeight::LEAF).nodes, None);
         assert_eq!(large.repeat(2).metadata, Some(0));
     }
 }

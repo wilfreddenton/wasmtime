@@ -339,8 +339,8 @@ impl TypeTrace for ComponentTypes {
 }
 
 impl ComponentTypes {
-    /// Enumerates composite value types for runtime accounting precomputation.
-    pub fn work_accounting_types(&self) -> impl Iterator<Item = InterfaceType> + '_ {
+    /// Enumerates value types whose lifting weights require precomputation.
+    pub fn lifting_weight_types(&self) -> impl Iterator<Item = InterfaceType> + '_ {
         self.records
             .keys()
             .map(InterfaceType::Record)

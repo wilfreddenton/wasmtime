@@ -1,10 +1,10 @@
 use crate::StoreContextMut;
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent::ConcurrentState;
+use crate::component::lifting_weights::LiftingWeights;
 use crate::component::matching::InstanceType;
 use crate::component::resources::{HostResourceData, HostResourceIndex, HostResourceTables};
 use crate::component::store::ComponentTaskState;
-use crate::component::work::WorkWeights;
 use crate::component::{Instance, ResourceType, RuntimeInstance};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
@@ -362,7 +362,7 @@ pub struct LiftContext<'a> {
 
     /// Native allocation allowance, independent of Store fuel; `None` disables it.
     hostcall_fuel: Option<usize>,
-    lifting: Option<(StoreFuel<'a>, &'a WorkWeights)>,
+    lifting: Option<(StoreFuel<'a>, &'a LiftingWeights)>,
 }
 
 #[doc(hidden)]
@@ -420,7 +420,9 @@ impl<'a> LiftContext<'a> {
             lifting: store_fuel.filter(|_| metered).map(|fuel| {
                 (
                     fuel,
-                    component.work_weights().expect("lifting weights missing"),
+                    component
+                        .lifting_weights()
+                        .expect("lifting weights missing"),
                 )
             }),
         })

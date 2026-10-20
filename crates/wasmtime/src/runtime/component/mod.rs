@@ -108,6 +108,7 @@ pub(crate) mod concurrent;
 mod func;
 mod has_data;
 mod instance;
+mod lifting_weights;
 mod linker;
 mod matching;
 mod resource_table;
@@ -116,7 +117,6 @@ mod storage;
 pub(crate) mod store;
 pub mod types;
 mod values;
-mod work;
 pub use self::component::{Component, ComponentExportIndex, ExportLookup};
 #[cfg(feature = "task-group-hook")]
 pub use self::concurrent::TaskGroupHook;
