@@ -401,7 +401,7 @@ impl<'a> LiftContext<'a> {
         let memory =
             instance_handle.options_memory(unsafe { &*(store as *const StoreOpaque) }, options);
         let (task_state, host_table, handle_counter, host_resource_data, instance, store_fuel) =
-            store.lift_context_parts_with_fuel(instance_handle);
+            store.lift_context_parts(instance_handle);
         let (component, instance) = instance.component_and_self();
 
         Ok(LiftContext {

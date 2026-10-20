@@ -405,23 +405,7 @@ impl StoreOpaque {
         support
     }
 
-    #[cfg(feature = "component-model-async")]
     pub(crate) fn lift_context_parts(
-        &mut self,
-        instance: Instance,
-    ) -> (
-        &mut ComponentTaskState,
-        &mut HandleTable,
-        &mut HandleCounter,
-        &mut HostResourceData,
-        Pin<&mut ComponentInstance>,
-    ) {
-        let (state, table, counter, resources, instance, _) =
-            self.lift_context_parts_with_fuel(instance);
-        (state, table, counter, resources, instance)
-    }
-
-    pub(crate) fn lift_context_parts_with_fuel(
         &mut self,
         instance: Instance,
     ) -> (
