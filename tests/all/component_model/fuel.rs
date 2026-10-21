@@ -1,3 +1,5 @@
+#![cfg(not(miri))]
+
 use super::{ApiStyle, config};
 use crate::async_functions::CountPending;
 use std::collections::HashMap;

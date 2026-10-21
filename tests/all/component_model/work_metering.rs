@@ -1,5 +1,7 @@
 //! Function lifting fuel, deferred access, and excluded transfer paths.
 
+#![cfg(not(miri))]
+
 use super::{ApiStyle, config};
 use std::pin::Pin;
 use std::task::{Context, Poll};
