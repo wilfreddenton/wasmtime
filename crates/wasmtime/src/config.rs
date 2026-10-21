@@ -52,9 +52,9 @@ pub use wasmtime_environ::Inlining;
 /// Zero prices disable a category, even when its quantity overflows.
 ///
 /// Stream/future payload transfers, lowering, host result staging, guest-to-guest
-/// adapters, compilation, and instantiation are excluded. Stream/future handles
-/// passed as function values still incur a node charge. Application host work
-/// and custom unsafe bindings remain the embedder's responsibility.
+/// adapters are excluded. Stream/future handles passed as function values still
+/// incur a node charge. Application host work and custom unsafe bindings remain
+/// the embedder's responsibility.
 ///
 /// These are accounting units, not measured CPU use or a memory limit. The
 /// native allocation allowance is independent; see `Store::set_hostcall_fuel_enabled`.

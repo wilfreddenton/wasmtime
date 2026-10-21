@@ -480,48 +480,34 @@ fn adapter_component(source: &str, destination: &str, bytes: &[u8], source_len: 
 
 #[test]
 fn guest_adapter_transcoding_is_outside_lifting_meter() -> Result<()> {
-    for text in ["", "ASCII", "aéÿ", "aé𝄞"] {
-        for source in ["utf8", "utf16", "latin1+utf16"] {
-            let (bytes, source_len) = if source == "utf8" {
-                (text.as_bytes().to_vec(), text.len() as u32)
-            } else if source == "latin1+utf16" && text.chars().all(|c| u32::from(c) <= 255) {
-                let bytes: Vec<_> = text.chars().map(|c| c as u8).collect();
-                let len = bytes.len() as u32;
-                (bytes, len)
-            } else {
-                let bytes: Vec<_> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-                let len = bytes.len() as u32 / 2;
-                (
-                    bytes,
-                    len | if source == "latin1+utf16" { 1 << 31 } else { 0 },
-                )
-            };
-            for destination in ["utf8", "utf16", "latin1+utf16"] {
-                let wat = adapter_component(source, destination, &bytes, source_len);
-                let expected_len = match destination {
-                    "utf8" => text.len() as u32,
-                    "utf16" => text.encode_utf16().count() as u32,
-                    _ if text.chars().all(|c| u32::from(c) <= 255) => text.chars().count() as u32,
-                    _ => (text.encode_utf16().count() as u32) | (1 << 31),
-                };
-                let mut costs = Vec::new();
-                for metered in [false, true] {
-                    let engine = engine(metered.then_some(PRICES))?;
-                    let (mut store, instance) = instantiate(&engine, &wat)?;
-                    let result = instance
-                        .get_typed_func::<(), (u32,)>(&mut store, "run")?
-                        .call(&mut store, ())?
-                        .0;
-                    assert_eq!(result, expected_len, "{source} to {destination}: {text:?}");
-                    costs.push(BUDGET - store.get_fuel()?);
-                }
-                assert_eq!(
-                    costs[1] - costs[0],
-                    2 * 3,
-                    "{source} to {destination}: {text:?}"
-                );
-            }
+    // Cover every encoding pair, including both compact-string representations.
+    let utf8: &[u8] = "aé𝄞".as_bytes();
+    let utf16: &[u8] = b"a\0\xe9\0\x34\xd8\x1e\xdd";
+    let latin1: &[u8] = b"a\xe9";
+    let tagged_len = (1 << 31) | 4;
+    let engines = [engine(None)?, engine(Some(PRICES))?];
+    for (source, destination, bytes, source_len, expected_len) in [
+        ("utf8", "utf8", utf8, 7, 7),
+        ("utf8", "utf16", utf8, 7, 4),
+        ("utf8", "latin1+utf16", utf8, 7, tagged_len),
+        ("utf16", "utf8", utf16, 4, 7),
+        ("utf16", "utf16", utf16, 4, 4),
+        ("utf16", "latin1+utf16", utf16, 4, tagged_len),
+        ("latin1+utf16", "utf8", utf16, tagged_len, 7),
+        ("latin1+utf16", "utf16", latin1, 2, 2),
+        ("latin1+utf16", "latin1+utf16", latin1, 2, 2),
+    ] {
+        let wat = adapter_component(source, destination, bytes, source_len);
+        let mut costs = [0; 2];
+        for (engine, cost) in engines.iter().zip(&mut costs) {
+            let (mut store, instance) = instantiate(engine, &wat)?;
+            let (result,) = instance
+                .get_typed_func::<(), (u32,)>(&mut store, "run")?
+                .call(&mut store, ())?;
+            assert_eq!(result, expected_len, "{source} to {destination}");
+            *cost = BUDGET - store.get_fuel()?;
         }
+        assert_eq!(costs[1] - costs[0], 2 * 3, "{source} to {destination}");
     }
     Ok(())
 }

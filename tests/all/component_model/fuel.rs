@@ -33,11 +33,13 @@ fn string_component(engine: &Engine) -> Result<Component> {
                 ;; Use the same guest instructions for empty, valid, and invalid strings.
                 (func (export "run") (param $length i32) (result i32)
                     (i32.store (i32.const 4) (local.get $length))
-                    (i32.const 0)))
+                    (i32.const 0))
+                (func (export "scalar") (result i32) (i32.const 42)))
             (core instance $i (instantiate $m))
             (func (export "run") (param "length" u32) (result string)
                 (canon lift (core func $i "run")
-                    (memory (core memory $i "memory")))))"#,
+                    (memory (core memory $i "memory"))))
+            (func (export "scalar") (result u32) (canon lift (core func $i "scalar"))))"#,
     )
 }
 
@@ -454,20 +456,12 @@ fn lazy_list_iter_exhausts_fuel() -> Result<()> {
 
 #[test]
 fn failed_lifting_retains_fuel_charges() -> Result<()> {
-    let engine = Engine::new(
+    let (mut store, run, empty_call_cost) = string_fixture(
         config()
             .consume_fuel(true)
             .consume_lifting_fuel(Some(prices(1))),
     )?;
-    let component = string_component(&engine)?;
-    let mut store = Store::new(&engine, ());
-    store.set_fuel(u64::MAX)?;
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let run = instance.get_func(&mut store, "run").unwrap();
     let mut results = [Val::Bool(false)];
-    store.set_fuel(10_000)?;
-    run.call(&mut store, &[Val::U32(0)], &mut results)?;
-    let empty_call_cost = 10_000 - store.get_fuel()?;
     store.set_fuel(empty_call_cost + 17)?;
     let error = run
         .call(&mut store, &[Val::U32(17)], &mut results)
@@ -520,6 +514,45 @@ async fn typed_results_charge_fuel(style: ApiStyle) -> Result<()> {
     );
     assert_eq!(store.get_fuel()?, cost);
     style.call(&mut store, run, (16,)).await?;
+    assert_eq!(store.get_fuel()?, 0);
+
+    let scalar = instance.get_typed_func::<(), (u32,)>(&mut store, "scalar")?;
+    // Two guest instructions, plus the result tuple and scalar nodes.
+    store.set_fuel(2 + 2)?;
+    assert_eq!(style.call(&mut store, scalar, ()).await?.0, 42);
+    assert_eq!(store.get_fuel()?, 0);
+    store.set_fuel(2 + 2 - 1)?;
+    let error = style.call(&mut store, scalar, ()).await.unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
+    assert_eq!(store.get_fuel()?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_results_charge_fuel_concurrent() -> Result<()> {
+    let (mut store, run, empty_call_cost) = string_fixture(
+        ApiStyle::Concurrent
+            .config()
+            .consume_fuel(true)
+            .consume_lifting_fuel(Some(prices(1))),
+    )?;
+    let params = [Val::U32(16)];
+    let mut results = [Val::Bool(false)];
+    let cost = empty_call_cost + 16;
+    store.set_fuel(cost)?;
+    store
+        .run_concurrent(async |access| run.call_concurrent(access, &params, &mut results).await)
+        .await??;
+    assert_eq!(results, [Val::String("abcdefghijklmnop".into())]);
+    assert_eq!(store.get_fuel()?, 0);
+
+    store.set_fuel(cost - 1)?;
+    let error = store
+        .run_concurrent(async |access| run.call_concurrent(access, &params, &mut results).await)
+        .await
+        .and_then(|result| result)
+        .unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::OutOfFuel));
     assert_eq!(store.get_fuel()?, 0);
     Ok(())
 }

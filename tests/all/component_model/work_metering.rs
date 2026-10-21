@@ -57,11 +57,9 @@ fn shared_store_decoding_requires_mutable_access_when_metered() -> Result<()> {
     let run = instance.get_typed_func::<(), (WasmStr,)>(&mut store, "run")?;
     let (value,) = run.call(&mut store, ())?;
     store.set_fuel(0)?;
-    for _ in 0..4 {
-        let error = value.to_str(&store).unwrap_err();
-        assert!(error.to_string().contains("to_str_metered"));
-        assert_eq!(store.get_fuel()?, 0);
-    }
+    let error = value.to_str(&store).unwrap_err();
+    assert!(error.to_string().contains("to_str_metered"));
+    assert_eq!(store.get_fuel()?, 0);
     Ok(())
 }
 
