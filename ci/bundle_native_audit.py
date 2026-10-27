@@ -31,7 +31,8 @@ def definitions(path):
             continue
         if sys.platform == "darwin":
             name = name.removeprefix("_")
-        if name.startswith(("_R", "_ZN")):
+        # C++ also uses _ZN. Only legacy Rust's hash-bearing form is exempt.
+        if re.fullmatch(r"_ZN.+17h[0-9a-f]{16}E(?:\.llvm\.\d+)?", name) or re.match(r"_R[A-Z]", name):
             continue
         # LLVM promotes anonymous constants to globals during optimization.
         if re.fullmatch(r"anon\.[0-9a-f]+\.\d+(?:\.llvm\.\d+)?", name):

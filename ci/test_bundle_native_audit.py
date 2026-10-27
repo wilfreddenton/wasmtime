@@ -10,6 +10,22 @@ from bundle_native_audit import audit_final, audit_inputs, definitions
 
 
 class NativeAuditTests(unittest.TestCase):
+    def test_cpp_weak_global_is_not_mistaken_for_rust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventories = []
+            for index in (1, 2):
+                source = root / f"bundle{index}.cpp"
+                obj = source.with_suffix(".o")
+                source.write_text("namespace runtime { "
+                                  f"__attribute__((weak)) int shared = {index}; }}\n")
+                subprocess.run(["c++", "-c", str(source), "-o", str(obj)], check=True)
+                symbols = definitions(obj)
+                self.assertIn("_ZN7runtime6sharedE", symbols)
+                inventories.append([{"path": str(obj), "definitions": symbols}])
+            with self.assertRaisesRegex(RuntimeError, "collisions=.*_ZN7runtime6sharedE"):
+                audit_inputs(inventories, ["first", "second"], root)
+
     def test_weak_collision_survives_successful_link(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
