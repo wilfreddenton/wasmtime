@@ -1,0 +1,53 @@
+name: Kontor bundle isolation
+
+on:
+  pull_request:
+    branches: [function-lifting-metering]
+  push:
+    branches: [function-lifting-metering, kontor/protocol-bundle-isolation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dual-vm:
+    if: github.repository == 'wilfreddenton/wasmtime'
+    name: Dual VM (${{ matrix.os }}, ${{ matrix.configuration }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        configuration: [minimal, kontor]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch immutable comparison source
+        run: git fetch --depth=1 origin bfdee9ba9a483915dc95432708cf7db8281adbc1
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check fixture formatting
+        run: rustfmt --edition 2024 --check tests/bundle-isolation/bundle.rs tests/bundle-isolation/host.rs
+      - name: Test native ownership audit
+        run: python3 ci/test_bundle_native_audit.py
+      - name: Run isolated build and dual VM test
+        run: python3 ci/test-bundle-isolation.py --configuration ${{ matrix.configuration }} --output target/bundle-isolation
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: isolation-evidence-${{ matrix.os }}-${{ matrix.configuration }}
+          path: |
+            target/bundle-isolation/report.json
+            target/bundle-isolation/symbols.txt
+            target/bundle-isolation/native-*.json
+            target/bundle-isolation/*.log
+            target/bundle-isolation/first/*.log
+            target/bundle-isolation/first/Cargo.lock
+            target/bundle-isolation/second/*.log
+            target/bundle-isolation/second/Cargo.lock
+          if-no-files-found: error
