@@ -83,3 +83,9 @@ not a broad name-prefix exemption.
 Rayon's global compilation pool is private to each independently built graph.
 Both pools remain resident with their bundles. There is no shared Rayon pool or
 shared mutable native-library state.
+
+On macOS the final-only `_mh_execute_header` exception is the linker's executable
+header address, documented by Apple's
+[ldsyms.h](https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/ldsyms.h).
+An input library defining it still fails the audit. Rust legacy mangling is
+recognized by its hash-bearing form; the C++ `_ZN` prefix alone is not exempt.

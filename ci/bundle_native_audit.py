@@ -57,6 +57,9 @@ def inputs(messages):
 
 
 def native_owner(name, suffix):
+    # Mach-O's linker creates this executable-header address, not an input library.
+    if sys.platform == "darwin" and name == "_mh_execute_header":
+        return "compiler/linker runtime"
     if name in RUNTIME_SYMBOLS:
         return "compiler/linker runtime"
     if name.startswith("wasmtime_") and name.endswith("_" + suffix):

@@ -68,6 +68,16 @@ class NativeAuditTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "unowned final"):
                     audit_final(Path("unused"), ["first", "second"], Path(directory))
 
+    def test_macho_header_is_only_allowed_in_final_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            symbols = {"_mh_execute_header": {"address": "100000000", "kind": "T"}}
+            with patch("bundle_native_audit.sys.platform", "darwin"):
+                with patch("bundle_native_audit.definitions", return_value=symbols):
+                    audit_final(Path("unused"), ["first", "second"], Path(directory))
+                with self.assertRaisesRegex(RuntimeError, "unknown.*_mh_execute_header"):
+                    audit_inputs([[{"definitions": symbols}], []],
+                                 ["first", "second"], Path(directory))
+
     def test_darwin_normalization_preserves_rust_mangling(self):
         result = subprocess.CompletedProcess([], 0, stdout=(
             "00000000 T _wasmtime_helper_first\n"
