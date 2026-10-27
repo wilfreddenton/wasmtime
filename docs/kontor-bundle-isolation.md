@@ -23,7 +23,7 @@ For a fully populated local Cargo cache, add `--offline`. The immutable baseline
 commit must be present locally. Each facade receives its own Cargo lock and target
 directory, and the final executable links the resulting rlibs directly. The second
 graph enables an additional backtrace feature in the minimal case. The `kontor`
-case uses the node's default features plus wave, excluding debug-builtins and cache, in both
+case uses the node's default features plus wave, excluding debug-builtins, cache and profiling, in both
 graphs. The facades have distinct
 portable lifting prices, so runtime dispatch is observable. The host exercises
 memory and stack traps, fuel yielding on async fibers, alternating VM calls, and
@@ -89,3 +89,11 @@ header address, documented by Apple's
 [ldsyms.h](https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/ldsyms.h).
 An input library defining it still fails the audit. Rust legacy mangling is
 recognized by its hash-bearing form; the C++ `_ZN` prefix alone is not exempt.
+
+The unused `profiling` feature is forbidden too. On x86 it introduces ittapi's
+unversioned mutable native globals. Kontor already uses ProfilingStrategy::None;
+the fixture and future bundle adapters set this explicitly. K1 rejects profiling
+and ITT/iJIT native inputs. K2b must qualify the cumulative debug-builtins, cache
+and profiling feature delta against the original P1 build. No profiling-state
+sharing exemption is permitted. The bundle definition must record all three
+exclusions and their reasons.

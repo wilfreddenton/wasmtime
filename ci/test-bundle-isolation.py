@@ -16,6 +16,7 @@ from bundle_native_audit import audit_final, audit_inputs, inputs
 
 BASELINE = "bfdee9ba9a483915dc95432708cf7db8281adbc1"
 TOOLCHAIN = "1.99.1"
+FORBIDDEN_FEATURES = {"debug-builtins", "cache", "profiling"}
 
 
 def native_suffix(version):
@@ -69,7 +70,7 @@ def main():
         features = ["std", "runtime", "cranelift", "wat", "async", "component-model"]
         if args.configuration == "kontor":
             package = tomllib.loads((source / "crates/wasmtime/Cargo.toml").read_text())
-            features = sorted(set(package["features"]["default"] + ["wave", "component-model-async"]) - {"debug-builtins", "cache"})
+            features = sorted(set(package["features"]["default"] + ["wave", "component-model-async"]) - FORBIDDEN_FEATURES)
         elif name == "second":
             features.append("backtrace")
         manifest = (
@@ -98,7 +99,7 @@ def main():
         vm_ids = {p["id"] for p in metadata["packages"] if p["name"] == "wasmtime"}
         resolved_features = sorted({feature for node in metadata["resolve"]["nodes"]
                                     if node["id"] in vm_ids for feature in node["features"]})
-        if {"cache", "debug-builtins"} & set(resolved_features):
+        if FORBIDDEN_FEATURES & set(resolved_features):
             raise RuntimeError("forbidden Wasmtime features entered the resolved graph")
         source_lock = tomllib.loads((source / "Cargo.lock").read_text())
         facade_lock = tomllib.loads((project / "Cargo.lock").read_text())

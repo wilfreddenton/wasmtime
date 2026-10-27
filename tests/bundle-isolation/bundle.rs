@@ -7,7 +7,9 @@ use std::task::{Context, Poll, Wake, Waker};
 #[cfg(feature = "kontor")]
 use wasmtime::InstanceAllocationStrategy;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Instance, LiftingPrices, Module, Result, Store, Trap};
+use wasmtime::{
+    Config, Engine, Instance, LiftingPrices, Module, ProfilingStrategy, Result, Store, Trap,
+};
 
 struct WakeCounter(AtomicUsize);
 
@@ -38,6 +40,7 @@ fn exercise() -> Result<(u64, usize)> {
     config
         .macos_use_mach_ports(false)
         .debug_info(false)
+        .profiler(ProfilingStrategy::None)
         .consume_fuel(true)
         .consume_lifting_fuel(Some(LiftingPrices {
             lift_value: rate,
