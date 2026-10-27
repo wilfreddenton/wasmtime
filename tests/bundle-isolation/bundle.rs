@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+#[cfg(feature = "kontor")]
+use wasmtime::InstanceAllocationStrategy;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Instance, LiftingPrices, Module, Result, Store, Trap};
 
@@ -31,13 +33,32 @@ fn complete<T>(future: impl Future<Output = T>) -> (T, usize) {
 fn exercise() -> Result<(u64, usize)> {
     let rate: u64 = env!("BUNDLE_LIFT_RATE").parse().unwrap();
     let mut config = Config::new();
+    // Independent Mach-port handlers overwrite each other's per-thread port.
+    // Unix handlers can delegate faults to the other retained VM's handler.
     config
+        .macos_use_mach_ports(false)
+        .debug_info(false)
         .consume_fuel(true)
         .consume_lifting_fuel(Some(LiftingPrices {
             lift_value: rate,
             string_byte: 7,
             metadata_byte: 11,
         }));
+    #[cfg(feature = "kontor")]
+    config
+        .wasm_component_model_async(true)
+        .consume_lifting_fuel(Some(LiftingPrices {
+            lift_value: rate,
+            string_byte: 16,
+            metadata_byte: 16,
+        }))
+        .memory_init_cow(false)
+        .wasm_custom_page_sizes(false)
+        .allocation_strategy(InstanceAllocationStrategy::OnDemand)
+        .memory_may_move(true)
+        .wasm_threads(false)
+        .wasm_relaxed_simd(false)
+        .cranelift_nan_canonicalization(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(
         &engine,
@@ -55,6 +76,21 @@ fn exercise() -> Result<(u64, usize)> {
     assert_eq!(run.call(&mut store, ())?.0, 42);
     let charged = 1_000_000 - store.get_fuel()?;
     assert_eq!(charged, 2 + 2 * rate);
+
+    #[cfg(feature = "kontor")]
+    {
+        let mut async_store = Store::new(&engine, ());
+        async_store.set_hostcall_fuel_enabled(false);
+        async_store.set_fuel(1_000_000)?;
+        let linker = Linker::new(&engine);
+        let (instance, _) = complete(linker.instantiate_async(&mut async_store, &component));
+        let instance = instance?;
+        let run = instance.get_typed_func::<(), (u32,)>(&mut async_store, "run")?;
+        async_store.set_fuel(1_000_000)?;
+        let (result, _) = complete(run.call_async(&mut async_store, ()));
+        assert_eq!(result?.0, 42);
+        assert_eq!(1_000_000 - async_store.get_fuel()?, charged);
+    }
 
     let module = Module::new(
         &engine,

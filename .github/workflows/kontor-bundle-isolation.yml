@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [function-lifting-metering]
   push:
-    branches: [function-lifting-metering]
+    branches: [function-lifting-metering, kontor/protocol-bundle-isolation]
   workflow_dispatch:
 
 permissions:
@@ -33,6 +33,8 @@ jobs:
           python-version: '3.13'
       - name: Check fixture formatting
         run: rustfmt --edition 2024 --check tests/bundle-isolation/bundle.rs tests/bundle-isolation/host.rs
+      - name: Test native ownership audit
+        run: python3 ci/test_bundle_native_audit.py
       - name: Run isolated build and dual VM test
         run: python3 ci/test-bundle-isolation.py --configuration ${{ matrix.configuration }} --output target/bundle-isolation
       - uses: actions/upload-artifact@v7
@@ -42,6 +44,7 @@ jobs:
           path: |
             target/bundle-isolation/report.json
             target/bundle-isolation/symbols.txt
+            target/bundle-isolation/native-*.json
             target/bundle-isolation/*.log
             target/bundle-isolation/first/*.log
             target/bundle-isolation/first/Cargo.lock
