@@ -17,6 +17,43 @@ fn pulley_config() -> Config {
 }
 
 #[test]
+fn stack_overflow_preserves_store_reuse() -> Result<()> {
+    let mut config = pulley_config();
+    config.max_wasm_stack(1024);
+    let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (func $recurse (export "recurse") (result i32)
+                    call $recurse
+                    i32.const 1
+                    i32.add)
+                (func (export "small") (param i32) (result i32)
+                    local.get 0
+                    i32.const 7
+                    i32.add))
+        "#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let recurse = instance.get_typed_func::<(), i32>(&mut store, "recurse")?;
+    let small = instance.get_typed_func::<i32, i32>(&mut store, "small")?;
+
+    for input in [4, 9] {
+        let trap = recurse
+            .call(&mut store, ())
+            .unwrap_err()
+            .downcast::<Trap>()?;
+        assert_eq!(trap, Trap::StackOverflow);
+        assert_eq!(small.call(&mut store, input)?, input + 7);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn can_compile_pulley_module() -> Result<()> {
     let engine = Engine::new(&pulley_config())?;
     Module::new(&engine, "(module)")?;
