@@ -33,13 +33,26 @@ fn stack_overflow_preserves_store_reuse() -> Result<()> {
                 (func (export "small") (param i32) (result i32)
                     local.get 0
                     i32.const 7
-                    i32.add))
+                    i32.add)
+                (func $bounded (export "bounded") (param i32) (result i32)
+                    local.get 0
+                    if (result i32)
+                        local.get 0
+                        i32.const 1
+                        i32.sub
+                        call $bounded
+                        i32.const 1
+                        i32.add
+                    else
+                        i32.const 0
+                    end))
         "#,
     )?;
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
     let recurse = instance.get_typed_func::<(), i32>(&mut store, "recurse")?;
     let small = instance.get_typed_func::<i32, i32>(&mut store, "small")?;
+    let bounded = instance.get_typed_func::<i32, i32>(&mut store, "bounded")?;
 
     for input in [4, 9] {
         let trap = recurse
@@ -48,6 +61,7 @@ fn stack_overflow_preserves_store_reuse() -> Result<()> {
             .downcast::<Trap>()?;
         assert_eq!(trap, Trap::StackOverflow);
         assert_eq!(small.call(&mut store, input)?, input + 7);
+        assert_eq!(bounded.call(&mut store, 4)?, 4);
     }
 
     Ok(())
