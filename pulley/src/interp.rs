@@ -1,5 +1,7 @@
 //! Interpretation of pulley bytecode.
 
+#[cfg(test)]
+use crate::Ret;
 use crate::decode::*;
 use crate::encode::Encode;
 use crate::imms::*;
@@ -764,6 +766,9 @@ unsafe impl Sync for MachineState {}
 /// This is manually done with a helper `Align16` type below.
 struct Stack {
     storage: TryVec<Align16>,
+    // Vec capacity may exceed the requested reservation; spare bytes cannot
+    // change the guest-visible overflow boundary.
+    logical_len: usize,
 }
 
 /// Helper type used with `Stack` above.
@@ -776,17 +781,21 @@ struct Align16 {
 }
 
 impl Stack {
-    /// Creates a new stack which will have a byte size of at least `size`.
+    /// Creates a new stack with a logical byte size of at least `size`.
     ///
-    /// The allocated stack might be slightly larger due to rounding necessary.
+    /// The logical size is rounded to 16 bytes. The allocation may be larger.
     fn new(size: usize) -> Result<Stack, OutOfMemory> {
         let mut storage = TryVec::new();
-        // Round up `size` to the nearest multiple of 16. Note that the
-        // stack is also allocated here but not initialized, and that's
-        // intentional as pulley bytecode should always initialize the stack
-        // before use.
-        storage.reserve_exact(size.checked_next_multiple_of(16).unwrap_or(usize::MAX) / 16)?;
-        Ok(Stack { storage })
+        let logical_len = size
+            .checked_next_multiple_of(16)
+            .ok_or(OutOfMemory::new(size))?;
+        // Bytecode initializes stack slots before use, so reserve without
+        // increasing the vector's initialized length.
+        storage.reserve_exact(logical_len / 16)?;
+        Ok(Stack {
+            storage,
+            logical_len,
+        })
     }
 
     /// Returns a pointer to the top of the stack (the highest address).
@@ -806,9 +815,9 @@ impl Stack {
         self.storage.as_mut_ptr().cast::<u8>()
     }
 
-    /// Returns the length, in bytes, of this stack allocation.
+    /// Returns the logical length, in bytes, of this stack.
     fn len(&self) -> usize {
-        self.storage.capacity() * mem::size_of::<Align16>()
+        self.logical_len
     }
 }
 
@@ -1296,6 +1305,14 @@ impl AddressingMode for AddrG32Bne {
 #[test]
 fn simple_push_pop() {
     let mut state = MachineState::with_stack(16).unwrap();
+    // Reserve beyond the logical limit to catch any future use of Vec capacity
+    // as the stack bound, even when the allocator ordinarily reserves exactly.
+    state.stack.storage.reserve_exact(2).unwrap();
+    assert!(state.stack.storage.capacity() >= 2);
+    let base = state.stack.base();
+    let top = state.stack.top();
+    assert_eq!(top, unsafe { base.add(16) });
+    state[XReg::sp] = XRegVal::new_ptr(top);
     let pc = ExecutingPc::default();
     unsafe {
         let mut bytecode = [0; 10];
@@ -1305,19 +1322,64 @@ fn simple_push_pop() {
             pc: UnsafeBytecodeStream::new(NonNull::new(bytecode.as_mut_ptr().offset(4)).unwrap()),
             executing_pc: pc.as_ref(),
         };
-        assert!(i.push::<crate::Ret, _>(0_i32).is_continue());
+        assert!(i.push::<Ret, _>(0_i32).is_continue());
         assert_eq!(i.pop::<i32>(), 0_i32);
-        assert!(i.push::<crate::Ret, _>(1_i32).is_continue());
-        assert!(i.push::<crate::Ret, _>(2_i32).is_continue());
-        assert!(i.push::<crate::Ret, _>(3_i32).is_continue());
-        assert!(i.push::<crate::Ret, _>(4_i32).is_continue());
-        assert!(i.push::<crate::Ret, _>(5_i32).is_break());
-        assert!(i.push::<crate::Ret, _>(6_i32).is_break());
+        assert!(i.push::<Ret, _>(1_i32).is_continue());
+        assert!(i.push::<Ret, _>(2_i32).is_continue());
+        assert!(i.push::<Ret, _>(3_i32).is_continue());
+        assert!(i.push::<Ret, _>(4_i32).is_continue());
+        assert!(i.push::<Ret, _>(5_i32).is_break());
+        assert!(matches!(
+            i.state.done_reason.as_ref(),
+            Some(DoneReason::Trap {
+                kind: Some(TrapKind::StackOverflow),
+                ..
+            })
+        ));
+        assert!(i.push::<Ret, _>(6_i32).is_break());
         assert_eq!(i.pop::<i32>(), 4_i32);
         assert_eq!(i.pop::<i32>(), 3_i32);
         assert_eq!(i.pop::<i32>(), 2_i32);
         assert_eq!(i.pop::<i32>(), 1_i32);
     }
+}
+
+#[test]
+fn stack_size_rounding_and_traps() {
+    let mut state = MachineState::with_stack(17).unwrap();
+    assert_eq!(state.stack.len(), 32);
+    let pc = ExecutingPc::default();
+    unsafe {
+        let mut bytecode = [0; 10];
+        let mut i = Interpreter {
+            state: &mut state,
+            pc: UnsafeBytecodeStream::new(NonNull::new(bytecode.as_mut_ptr().add(4)).unwrap()),
+            executing_pc: pc.as_ref(),
+        };
+        for value in 0..8 {
+            assert!(i.push::<Ret, _>(value).is_continue());
+        }
+        let sp = i.state[XReg::sp].get_ptr::<u8>();
+        assert!(i.push::<Ret, _>(8_i32).is_break());
+        assert!(matches!(
+            i.state.done_reason.as_ref(),
+            Some(DoneReason::Trap {
+                kind: Some(TrapKind::StackOverflow),
+                ..
+            })
+        ));
+        assert!(i.push::<Ret, _>(9_i32).is_break());
+        assert_eq!(i.state[XReg::sp].get_ptr::<u8>(), sp);
+        for value in (0..8).rev() {
+            assert_eq!(i.pop::<i32>(), value);
+        }
+    }
+}
+
+#[test]
+fn stack_size_rounding_overflow() {
+    let error = Stack::new(usize::MAX).err().unwrap();
+    assert_eq!(error.requested_allocation_size(), isize::MAX as usize);
 }
 
 macro_rules! br_if_imm {

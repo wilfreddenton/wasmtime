@@ -1,9 +1,12 @@
 # Kontor's retained Wasmtime builds
 
-This fork uses the immutable package version `51.0.0-kontor.1` for its first
-retained Kontor build. A later source or feature/configuration identity that needs
-native isolation must get a different package version. Do not reuse this version
-for a different retained implementation or derive identity from a moving branch.
+The immutable `51.0.0-kontor.1` package version belongs to the historical F1
+proof build. This release uses `51.0.0-kontor.2` for the Pulley logical-stack
+fix planned as final P1. A separate, version-only `.3` fork release is planned
+for the second proof graph, with the same fixed Pulley behavior. Both final
+graph mappings remain subject to bundle qualification. The baseline and F1
+source/version identities remain reserved. Do not reuse an identity for a
+different implementation or derive identity from a moving branch.
 
 The versioned-export macro appends the package version to Rust imports/exports.
 The Wasmtime C helper and Windows fiber builds obtain `VERSIONED_SUFFIX` from that

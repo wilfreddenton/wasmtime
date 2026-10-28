@@ -121,6 +121,7 @@ fn provenance_test_config() -> Config {
 fn pulley_provenance_test() -> Result<()> {
     let config = provenance_test_config();
     let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
     let module = if cfg!(miri) {
         unsafe { Module::deserialize_file(&engine, "./tests/all/pulley_provenance_test.cwasm")? }
     } else {
@@ -236,6 +237,7 @@ fn pulley_provenance_test() -> Result<()> {
 fn pulley_provenance_test_components() -> Result<()> {
     let config = provenance_test_config();
     let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
     let component = if cfg!(miri) {
         unsafe {
             Component::deserialize_file(
