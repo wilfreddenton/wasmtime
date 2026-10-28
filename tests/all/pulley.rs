@@ -48,6 +48,29 @@ fn stack_overflow_preserves_store_reuse() -> Result<()> {
                     end))
         "#,
     )?;
+    let max_legal_depth = {
+        let mut baseline = Store::new(&engine, ());
+        let instance = Instance::new(&mut baseline, &module, &[])?;
+        let bounded = instance.get_typed_func::<i32, i32>(&mut baseline, "bounded")?;
+        let mut last_success: Option<i32> = None;
+        let mut first_failure: Option<i32> = None;
+        for depth in 0..1024 {
+            match bounded.call(&mut baseline, depth) {
+                Ok(result) => {
+                    assert_eq!(result, depth);
+                    last_success = Some(depth);
+                }
+                Err(error) => {
+                    assert_eq!(error.downcast::<Trap>()?, Trap::StackOverflow);
+                    first_failure = Some(depth);
+                    break;
+                }
+            }
+        }
+        let depth = last_success.expect("bounded depth zero must succeed");
+        assert_eq!(first_failure, Some(depth + 1));
+        depth
+    };
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
     let recurse = instance.get_typed_func::<(), i32>(&mut store, "recurse")?;
@@ -61,7 +84,13 @@ fn stack_overflow_preserves_store_reuse() -> Result<()> {
             .downcast::<Trap>()?;
         assert_eq!(trap, Trap::StackOverflow);
         assert_eq!(small.call(&mut store, input)?, input + 7);
-        assert_eq!(bounded.call(&mut store, 4)?, 4);
+        assert_eq!(bounded.call(&mut store, max_legal_depth)?, max_legal_depth);
+        let trap = bounded
+            .call(&mut store, max_legal_depth + 1)
+            .unwrap_err()
+            .downcast::<Trap>()?;
+        assert_eq!(trap, Trap::StackOverflow);
+        assert_eq!(bounded.call(&mut store, max_legal_depth)?, max_legal_depth);
     }
 
     Ok(())

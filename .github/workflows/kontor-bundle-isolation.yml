@@ -4,13 +4,74 @@ on:
   pull_request:
     branches: [function-lifting-metering]
   push:
-    branches: [function-lifting-metering, kontor/protocol-bundle-isolation]
+    branches: [function-lifting-metering, kontor/protocol-bundle-isolation, kontor/pulley-logical-stack-limit]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  pulley-stack:
+    if: github.repository == 'wilfreddenton/wasmtime'
+    name: Pulley stack (${{ matrix.os }}, ${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+            profile: dev
+          - os: ubuntu-24.04
+            arch: x86_64
+            profile: release
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            profile: dev
+          - os: macos-15
+            arch: arm64
+            profile: dev
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Verify runner and install guest test targets
+        run: |
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          rustup target add wasm32-wasip1 wasm32-unknown-unknown
+      - name: Test interpreter stack boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -j2 --profile '${{ matrix.profile }}' -p pulley-interpreter --features interp --lib 2>&1 | tee "$RUNNER_TEMP/pulley-interpreter.log"
+          grep -Fq 'test interp::simple_push_pop ... ok' "$RUNNER_TEMP/pulley-interpreter.log"
+          grep -Fq 'test interp::stack_size_rounding_and_traps ... ok' "$RUNNER_TEMP/pulley-interpreter.log"
+          grep -Fq 'test interp::stack_size_rounding_overflow ... ok' "$RUNNER_TEMP/pulley-interpreter.log"
+          grep -Fq 'test result: ok. 8 passed; 0 failed;' "$RUNNER_TEMP/pulley-interpreter.log"
+      - name: Build Pulley component test target
+        run: cargo test --locked -j2 --profile '${{ matrix.profile }}' -p wasmtime-cli --test all --features pulley --no-run
+      - name: Test Pulley calls, components, and Store reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          index=0
+          for test_case in \
+            pulley::pulley_provenance_test \
+            pulley::pulley_provenance_test_components \
+            component_model::resources::reenter_during_import_pulley \
+            stack_overflow::craneliftpulley_tiny_wasm_stack_traps_on_entry \
+            pulley::stack_overflow_preserves_store_reuse
+          do
+            index=$((index + 1))
+            output="$RUNNER_TEMP/pulley-case-$index.log"
+            cargo test --locked -j2 --profile '${{ matrix.profile }}' -p wasmtime-cli --test all --features pulley "$test_case" -- --exact 2>&1 | tee "$output"
+            grep -Fq 'running 1 test' "$output"
+            grep -Fq "test $test_case ... ok" "$output"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$output"
+          done
+
   dual-vm:
     if: github.repository == 'wilfreddenton/wasmtime'
     name: Dual VM (${{ matrix.os }}, ${{ matrix.configuration }})
