@@ -17,6 +17,86 @@ fn pulley_config() -> Config {
 }
 
 #[test]
+fn stack_overflow_preserves_store_reuse() -> Result<()> {
+    let mut config = pulley_config();
+    config.max_wasm_stack(1024);
+    let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (func $recurse (export "recurse") (result i32)
+                    call $recurse
+                    i32.const 1
+                    i32.add)
+                (func (export "small") (param i32) (result i32)
+                    local.get 0
+                    i32.const 7
+                    i32.add)
+                (func $bounded (export "bounded") (param i32) (result i32)
+                    local.get 0
+                    if (result i32)
+                        local.get 0
+                        i32.const 1
+                        i32.sub
+                        call $bounded
+                        i32.const 1
+                        i32.add
+                    else
+                        i32.const 0
+                    end))
+        "#,
+    )?;
+    let max_legal_depth = {
+        let mut baseline = Store::new(&engine, ());
+        let instance = Instance::new(&mut baseline, &module, &[])?;
+        let bounded = instance.get_typed_func::<i32, i32>(&mut baseline, "bounded")?;
+        let mut last_success: Option<i32> = None;
+        let mut first_failure: Option<i32> = None;
+        for depth in 0..1024 {
+            match bounded.call(&mut baseline, depth) {
+                Ok(result) => {
+                    assert_eq!(result, depth);
+                    last_success = Some(depth);
+                }
+                Err(error) => {
+                    assert_eq!(error.downcast::<Trap>()?, Trap::StackOverflow);
+                    first_failure = Some(depth);
+                    break;
+                }
+            }
+        }
+        let depth = last_success.expect("bounded depth zero must succeed");
+        assert_eq!(first_failure, Some(depth + 1));
+        depth
+    };
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let recurse = instance.get_typed_func::<(), i32>(&mut store, "recurse")?;
+    let small = instance.get_typed_func::<i32, i32>(&mut store, "small")?;
+    let bounded = instance.get_typed_func::<i32, i32>(&mut store, "bounded")?;
+
+    for input in [4, 9] {
+        let trap = recurse
+            .call(&mut store, ())
+            .unwrap_err()
+            .downcast::<Trap>()?;
+        assert_eq!(trap, Trap::StackOverflow);
+        assert_eq!(small.call(&mut store, input)?, input + 7);
+        assert_eq!(bounded.call(&mut store, max_legal_depth)?, max_legal_depth);
+        let trap = bounded
+            .call(&mut store, max_legal_depth + 1)
+            .unwrap_err()
+            .downcast::<Trap>()?;
+        assert_eq!(trap, Trap::StackOverflow);
+        assert_eq!(bounded.call(&mut store, max_legal_depth)?, max_legal_depth);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn can_compile_pulley_module() -> Result<()> {
     let engine = Engine::new(&pulley_config())?;
     Module::new(&engine, "(module)")?;
@@ -121,6 +201,7 @@ fn provenance_test_config() -> Config {
 fn pulley_provenance_test() -> Result<()> {
     let config = provenance_test_config();
     let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
     let module = if cfg!(miri) {
         unsafe { Module::deserialize_file(&engine, "./tests/all/pulley_provenance_test.cwasm")? }
     } else {
@@ -236,6 +317,7 @@ fn pulley_provenance_test() -> Result<()> {
 fn pulley_provenance_test_components() -> Result<()> {
     let config = provenance_test_config();
     let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
     let component = if cfg!(miri) {
         unsafe {
             Component::deserialize_file(

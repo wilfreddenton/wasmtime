@@ -678,7 +678,24 @@ fn dynamic_val() -> Result<()> {
 
 #[test]
 fn reenter_during_import() -> Result<()> {
-    let engine = super::engine();
+    reenter_during_import_with_engine(super::engine())
+}
+
+#[test]
+fn reenter_during_import_pulley() -> Result<()> {
+    let mut config = super::config();
+    let target = if cfg!(target_pointer_width = "64") {
+        "pulley64"
+    } else {
+        "pulley32"
+    };
+    config.target(target)?;
+    let engine = Engine::new(&config)?;
+    assert!(engine.is_pulley());
+    reenter_during_import_with_engine(engine)
+}
+
+fn reenter_during_import_with_engine(engine: Engine) -> Result<()> {
     let c = Component::new(
         &engine,
         r#"
@@ -722,9 +739,12 @@ fn reenter_during_import() -> Result<()> {
     let ctor = i.get_typed_func::<(u32,), (ResourceAny,)>(&mut store, "ctor")?;
     let call = i.get_typed_func::<(), ()>(&mut store, "call")?;
 
-    let (resource,) = ctor.call(&mut store, (100,))?;
-    *store.data_mut() = Some(resource);
-    call.call(&mut store, ())?;
+    for rep in [100, 101] {
+        let (resource,) = ctor.call(&mut store, (rep,))?;
+        *store.data_mut() = Some(resource);
+        call.call(&mut store, ())?;
+        assert!(store.data().is_none());
+    }
 
     Ok(())
 }
